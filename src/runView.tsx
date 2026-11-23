@@ -11,7 +11,7 @@ import { buildPmSessionPlan, spawnClaudeProcess, PmPhase } from "./agents.js";
 // (planHtml.ts) computes the exact same checklist the TUI shows here,
 // instead of drifting out of sync with a second copy of this logic.
 import { computeChecklist, checklistColor, checklistMark } from "./pipeline.js";
-import { buildPlanHtml, openInBrowser } from "./planHtml.js";
+import { buildPlanHtml, openInBrowser, hasOpenQuestions } from "./planHtml.js";
 
 const LOG_POLL_MS = 1000;
 const MAX_LINES = 2000;
@@ -240,6 +240,13 @@ function App({
   // shown, since the top is where the summary/overview lives.
   const [planScroll, setPlanScroll] = useState(0);
   const [planHtmlPath, setPlanHtmlPath] = useState("");
+  // Free-text answers to a "คำถามถึง PO" section PM wrote into plan.md (see
+  // src/planHtml.ts's hasOpenQuestions). Typed in-place on this same screen
+  // ("a" key) rather than requiring the PO to edit plan.md by hand, then
+  // written to answers.md for the post-approval PM invocation to read (see
+  // buildInitialPrompt's continueAfterApproval branch in src/agents.ts).
+  const [answering, setAnswering] = useState(false);
+  const [answerText, setAnswerText] = useState("");
   const childRef = useRef<ChildProcessByStdio<null, Readable, Readable> | null>(null);
   const tailRef = useRef(""); // carries a partial last line between chunks
   const retryTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -434,6 +441,42 @@ function App({
   const planMaxScroll = Math.max(0, planLines.length - planVisibleRows);
 
   useInput((input, key) => {
+    if (answering) {
+      if (key.ctrl && input === "c") {
+        // Cancel just the answer box, not the whole run — easy to fat-finger
+        // mid-typing, and nothing's written to answers.md until Esc anyway.
+        setAnswering(false);
+        return;
+      }
+      if (key.escape) {
+        const trimmed = answerText.trim();
+        if (trimmed) {
+          try {
+            fs.writeFileSync(featureFile(repoRoot, meta.feature, "answers"), trimmed + "\n", "utf8");
+          } catch {
+            // Best-effort — if this fails PM just proceeds without answers,
+            // same as if the PO had pressed "y" without typing any.
+          }
+        }
+        setAnswering(false);
+        setAwaitingApproval(false);
+        setLines([]); // fresh transcript for the post-approval PM invocation
+        startPhase("continueAfterApproval");
+        return;
+      }
+      if (key.return) {
+        setAnswerText((t) => t + "\n");
+        return;
+      }
+      if (key.backspace || key.delete) {
+        setAnswerText((t) => t.slice(0, -1));
+        return;
+      }
+      if (input && !key.ctrl && !key.meta) {
+        setAnswerText((t) => t + input);
+      }
+      return;
+    }
     if (key.ctrl && input === "c") {
       clearPendingRetry();
       childRef.current?.kill();
@@ -442,7 +485,10 @@ function App({
       return;
     }
     if (awaitingApproval) {
-      if (input === "y" || key.return) {
+      if (input === "a") {
+        setAnswerText("");
+        setAnswering(true);
+      } else if (input === "y" || key.return) {
         setAwaitingApproval(false);
         setLines([]); // fresh transcript for the post-approval PM invocation
         startPhase("continueAfterApproval");
@@ -470,10 +516,39 @@ function App({
     }
   });
 
+  if (answering) {
+    const answerLines = answerText.length === 0 ? [""] : answerText.split("\n");
+    return (
+      <Box flexDirection="column" width={columns} height={rows}>
+        <Box>
+          <Text bold>pmctl run — {meta.feature}</Text>
+          <Text dimColor> — พิมพ์คำตอบให้ PM ก่อนอนุมัติ plan</Text>
+        </Box>
+        <Box
+          marginTop={1}
+          height={Math.max(5, rows - HEADER_ROWS)}
+          flexDirection="column"
+          borderStyle="single"
+          paddingX={1}
+        >
+          <Text bold color="yellow">
+            พิมพ์คำตอบคำถามที่ PM ถามไว้ (ดูหัวข้อ "คำถามถึง PO" ใน plan) · Enter ขึ้นบรรทัดใหม่ · Esc บันทึกคำตอบ +
+            อนุมัติและสั่ง Dev ต่อ · Ctrl+C ยกเลิกการพิมพ์ (กลับไปดู plan)
+          </Text>
+          {answerLines.map((l, i) => (
+            <Text key={i}>{l || " "}</Text>
+          ))}
+          <Text dimColor>█</Text>
+        </Box>
+      </Box>
+    );
+  }
+
   if (awaitingApproval) {
     const visiblePlan = planLines.slice(planScroll, planScroll + planVisibleRows);
     const atTop = planScroll === 0;
     const atBottom = planScroll >= planMaxScroll;
+    const hasQuestions = hasOpenQuestions(planPreview);
     return (
       <Box flexDirection="column" width={columns} height={rows}>
         <Box>
@@ -488,9 +563,14 @@ function App({
           paddingX={1}
         >
           <Text bold color="yellow">
-            กด y หรือ Enter เพื่ออนุมัติและสั่ง Dev ต่อ · n ยกเลิก (แก้ plan.md เองได้แล้วรัน pmctl run ใหม่) · ↑/↓
-            หรือ j/k เลื่อน · space/f หน้าถัดไป · b หน้าก่อนหน้า · g/G บนสุด/ล่างสุด
+            กด y หรือ Enter เพื่ออนุมัติและสั่ง Dev ต่อ · a พิมพ์คำตอบให้ PM ก่อนอนุมัติ · n ยกเลิก (แก้ plan.md เองได้แล้วรัน
+            pmctl run ใหม่) · ↑/↓ หรือ j/k เลื่อน · space/f หน้าถัดไป · b หน้าก่อนหน้า · g/G บนสุด/ล่างสุด
           </Text>
+          {hasQuestions && (
+            <Text bold color="red">
+              ⚠ PM มีคำถามถึง PO ในแผนนี้ — กด a เพื่อพิมพ์คำตอบก่อนอนุมัติ
+            </Text>
+          )}
           {planHtmlPath ? (
             <Text dimColor>
               เปิด flow chart + plan แบบเต็ม (พยายามเปิดเบราว์เซอร์ให้แล้ว): file://{planHtmlPath}

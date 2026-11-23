@@ -22,6 +22,11 @@ export const FILES = {
   review: "review.md",
   report: "report.md",
   log: "log.ndjson",
+  // PO's free-text answers to any "คำถามถึง PO" section PM wrote into
+  // plan.md, typed in the terminal approval screen (see src/runView.tsx's
+  // "a" key) before approving. Empty/absent when PM asked nothing or the PO
+  // chose not to answer before approving anyway.
+  answers: "answers.md",
   pmSession: "pm-session.log",
   devSession: "dev-session.log",
   reviewerSession: "reviewer-session.log",

@@ -24,6 +24,7 @@ function buildVars(repoRoot: string, meta: Meta): Record<string, string> {
   return {
     SPEC_PATH: path.join(dir, FILES.spec),
     PLAN_PATH: path.join(dir, FILES.plan),
+    ANSWERS_PATH: path.join(dir, FILES.answers),
     REVIEW_PATH: path.join(dir, FILES.review),
     REPORT_PATH: path.join(dir, FILES.report),
     LOG_PATH: path.join(dir, FILES.log),
@@ -111,6 +112,10 @@ function buildInitialPrompt(phase: PmPhase, clickupRef: string, vars: Record<str
     return (
       `PHASE: continue-after-approval\n` +
       `spec.md (${vars.SPEC_PATH}) และ plan.md (${vars.PLAN_PATH}) มีอยู่แล้วจากรอบก่อนหน้า และ PO อนุมัติ plan แล้ว ` +
+      `ก่อนอื่น เช็คไฟล์ ${vars.ANSWERS_PATH} ก่อน — ถ้ามีอยู่และไม่ว่าง แปลว่า PO พิมพ์ตอบคำถามที่คุณถามไว้ใน plan.md ` +
+      `(หัวข้อ "คำถามถึง PO" หรือใกล้เคียง) ใช้ Read tool อ่านคำตอบนั้นก่อน แล้วเพิ่ม section "## คำตอบจาก PO" ต่อท้าย ` +
+      `plan.md เก็บคำตอบไว้เป็นหลักฐาน ก่อนสั่ง Dev ให้นำคำตอบไปปรับคำสั่งที่ส่งให้ Dev ด้วย (ถ้าไม่มีไฟล์นี้หรือว่าง แปลว่า ` +
+      `PO อนุมัติโดยไม่ตอบคำถาม ให้ใช้วิจารณญาณของคุณเองต่อไปตามที่เขียนไว้ใน plan.md เดิม) ` +
       `ข้ามขั้นตอน 0 และ 1 ไปเลย ไปเริ่มที่ขั้นตอน 2 (สั่ง Dev) ทันที ทำต่อจนจบทุกขั้นตอน ` +
       `(สั่ง Dev -> สั่ง Reviewer -> สั่ง Tester -> วนแก้ถ้า fail -> สรุปจบ)`
     );

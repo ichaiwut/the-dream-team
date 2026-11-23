@@ -12,6 +12,22 @@ function inlineMd(s: string): string {
   return s;
 }
 
+// PM sometimes writes a "## คำถามถึง PO" (or "Questions to/for PO") section
+// into plan.md when it needs a product decision only a human can make. This
+// file is a static, read-only snapshot (no form, no inputs), so detecting
+// that section lets the generated page point PO back at the one place that
+// *can* take an answer: the "a" key on the terminal approval screen (see
+// src/runView.tsx). Deliberately loose — it only has to catch the common
+// phrasings PM actually uses, not parse arbitrary markdown.
+// No \b around "คำถาม": \b only fires at a \w/non-\w boundary, and JS regex
+// treats Thai characters as non-\w, so a boundary never appears between a
+// space and Thai text — \b"คำถาม"\b would silently never match.
+const OPEN_QUESTIONS_HEADING_RE = /^#{1,6}.*(คำถาม|\bquestions?\b)/im;
+
+export function hasOpenQuestions(markdown: string): boolean {
+  return OPEN_QUESTIONS_HEADING_RE.test(markdown);
+}
+
 function splitTableRow(row: string): string[] {
   let r = row.trim();
   if (r.startsWith("|")) r = r.slice(1);
@@ -216,6 +232,10 @@ const STYLE = `
     background: #2a2410; border: 1px solid #e6c84a; color: #f3df8f;
     padding: 12px 16px; border-radius: 8px; margin-bottom: 28px; font-weight: 600;
   }
+  .banner.qa-banner {
+    background: #3a1414; border-color: #e65a5a; color: #ff9b9b; margin-top: -16px;
+  }
+  .banner code { background: rgba(255,255,255,0.12); }
   h2 { font-size: 1.15rem; margin-top: 28px; color: #7cc7ff; }
   h3 { font-size: 1.0rem; margin-top: 20px; color: #7cc7ff; }
   table { border-collapse: collapse; width: 100%; margin: 12px 0 20px; font-size: 0.92rem; }
@@ -311,6 +331,11 @@ export function buildPlanHtml(opts: {
   const { feature, clickupRef, planMarkdown, log, generatedAt } = opts;
   const flowChart = buildFlowChart(log);
   const planBody = mdToHtml(planMarkdown);
+  const qaBanner = hasOpenQuestions(planMarkdown)
+    ? `<div class="banner qa-banner">⚠ PM มีคำถามถึง PO ใน plan นี้ (ดูหัวข้อ "คำถามถึง PO" ด้านล่าง) — ` +
+      `หน้านี้อ่านอย่างเดียว ตอบตรงนี้ไม่ได้ กลับไปที่เทอร์มินัลที่รัน <code>pmctl run</code> แล้วกด <code>a</code> ` +
+      `เพื่อพิมพ์คำตอบก่อนกด approve</div>`
+    : "";
 
   return `<!doctype html>
 <html lang="th">
@@ -324,7 +349,8 @@ ${MERMAID_SCRIPT}
   <div class="wrap">
     <h1>Plan — ${escapeHtml(feature)} (${escapeHtml(clickupRef)})</h1>
     <div class="meta">สร้างเมื่อ ${escapeHtml(generatedAt)} — ไฟล์นี้เป็นสแนปช็อตแบบ static</div>
-    <div class="banner">อนุมัติ/ยกเลิก plan นี้ที่หน้าจอ <code>pmctl run</code> ในเทอร์มินัล (y/Enter อนุมัติ, n ยกเลิก) — หน้านี้มีไว้อ่านอย่างเดียว</div>
+    <div class="banner">อนุมัติ/ยกเลิก plan นี้ที่หน้าจอ <code>pmctl run</code> ในเทอร์มินัล (y/Enter อนุมัติ, n ยกเลิก, a พิมพ์คำตอบก่อนอนุมัติ) — หน้านี้มีไว้อ่านอย่างเดียว</div>
+    ${qaBanner}
 
     <h2>สถานะ pipeline</h2>
     ${flowChart}
