@@ -7,6 +7,11 @@ import { featureFile, stateRoot } from "./paths.js";
 import { spawnPmSession, spawnRefreshSpec } from "./agents.js";
 import { watchFeatures } from "./watch.js";
 import { runTui } from "./tui.js";
+import { runPmSessionWithTui } from "./runView.js";
+
+function isRealTty(): boolean {
+  return Boolean(process.stdin.isTTY && process.stdout.isTTY);
+}
 
 const repoRoot = process.cwd();
 const program = new Command();
@@ -53,7 +58,16 @@ program
         result: `worktree=${meta.worktreePath} port=${meta.port}`,
       });
 
-      await spawnPmSession(repoRoot, meta, opts.permissionMode, opts.clickup);
+      // Single-screen mode: when stdin/stdout are a real terminal, show PM's
+      // live output next to a status panel in one Ink UI instead of making
+      // you open a second terminal for `pmctl watch`. Falls back to plain
+      // stdout streaming when there's no real TTY (piped output, CI, etc.),
+      // same reasoning as the `watch` command's own fallback.
+      const exitCode = isRealTty()
+        ? await runPmSessionWithTui(repoRoot, meta, opts.permissionMode, opts.clickup)
+        : await spawnPmSession(repoRoot, meta, opts.permissionMode, opts.clickup);
+
+      if (exitCode !== 0) process.exitCode = exitCode;
     },
   );
 
@@ -121,11 +135,13 @@ program
 
 program
   .command("watch")
-  .description("เปิด TUI แบบ interactive ดูทุก feature + agent ตัวไหนกำลังทำอะไรอยู่ (เปิดอีก terminal คู่กับ pmctl run ได้)")
+  .description(
+    "เปิด TUI แบบ interactive ดูทุก feature พร้อมกัน (pmctl run เองก็โชว์ live view ของ feature ที่กำลังรันอยู่แล้ว — ใช้ watch ตอนอยากดูภาพรวมทุก feature จากที่เดียว หรือดูจากเครื่อง/terminal อื่น)",
+  )
   .option("--interval <ms>", "ความถี่ในการ refresh สำหรับโหมด non-interactive (ms)", "1500")
   .option("--plain", "บังคับใช้โหมด non-interactive (plain polling) แม้มี TTY ก็ตาม")
   .action((opts: { interval: string; plain?: boolean }) => {
-    const isInteractive = process.stdin.isTTY && process.stdout.isTTY && !opts.plain;
+    const isInteractive = isRealTty() && !opts.plain;
     if (isInteractive) {
       runTui(repoRoot);
     } else {

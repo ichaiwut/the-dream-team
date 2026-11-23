@@ -1,4 +1,5 @@
-import { spawn } from "node:child_process";
+import { spawn, ChildProcessByStdio } from "node:child_process";
+import type { Readable } from "node:stream";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39,7 +40,7 @@ interface RunClaudeOptions {
 
 function runClaude({ args, cwd, logFile }: RunClaudeOptions): Promise<number> {
   return new Promise((resolve, reject) => {
-    const child = spawn("claude", args, { cwd, stdio: ["inherit", "pipe", "pipe"] });
+    const child = spawnClaudeProcess(args, cwd);
 
     child.stdout.on("data", (chunk) => {
       process.stdout.write(chunk);
@@ -59,26 +60,35 @@ function runClaude({ args, cwd, logFile }: RunClaudeOptions): Promise<number> {
 }
 
 /**
- * Spawns the PM session. This is the ONLY claude process pmctl itself
- * spawns directly — PM is given bash access (via claude's own tools) and
- * is instructed, in roles/pm.md, to spawn Dev and Tester itself as further
- * `claude -p` subprocesses. pmctl does not orchestrate Dev/Tester directly;
- * that is PM's job, by design, so PM is a real reasoning agent in the loop
- * rather than a dumb pass-through.
- *
- * ClickUp access: PM uses your own already-authenticated ClickUp MCP
- * connector to read the task (no separate token needed). Write access to
- * ClickUp is blocked via --disallowedTools against every write-capable
- * ClickUp tool name known at the time clickupTools.ts was written — see
- * the warning in that file about this being a blocklist, not a structural
- * guarantee the way withholding a credential would be.
+ * Raw `claude` subprocess spawn, with no stdout/stderr handling attached.
+ * Exported so an interactive UI (src/runView.tsx) can attach its own
+ * listeners (to render output instead of writing it straight to stdout)
+ * while still sharing the exact same argument-building logic below.
  */
-export function spawnPmSession(
+export function spawnClaudeProcess(args: string[], cwd: string): ChildProcessByStdio<null, Readable, Readable> {
+  return spawn("claude", args, { cwd, stdio: ["inherit", "pipe", "pipe"] });
+}
+
+export interface PmSessionPlan {
+  args: string[];
+  cwd: string;
+  logFile: fs.WriteStream;
+  notice: string;
+}
+
+/**
+ * Builds everything needed to spawn the PM session (args, cwd, a log file
+ * stream, and the human-readable startup notice) without actually spawning
+ * it. Shared by the plain headless path (spawnPmSession below) and the
+ * interactive TUI path (src/runView.tsx), so both stay in sync on exactly
+ * what gets passed to `claude`.
+ */
+export function buildPmSessionPlan(
   repoRoot: string,
   meta: Meta,
   permissionMode: string,
   clickupRef: string
-): Promise<number> {
+): PmSessionPlan {
   const vars = buildVars(repoRoot, meta);
   const pmRoleTemplate = fs.readFileSync(path.join(ROLES_DIR, "pm.md"), "utf8");
   const pmSystemPrompt = fillTemplate(pmRoleTemplate, vars);
@@ -101,15 +111,44 @@ export function spawnPmSession(
     CLICKUP_WRITE_TOOLS.join(","),
   ];
 
-  console.log(
+  const notice =
     `\n[pmctl] กำลังเริ่ม PM session ใน ${meta.worktreePath} (port ${meta.port})\n` +
-      `[pmctl] หมายเหตุ: ถ้า claude CLI เครื่องนี้ไม่รู้จัก --append-system-prompt/--permission-mode/--disallowedTools ` +
-      `ให้รัน "claude --help" เช็คชื่อ flag ปัจจุบันแล้วแก้ใน src/agents.ts\n` +
-      `[pmctl] PM จะใช้ ClickUp connector ของบัญชีนี้เอง — tool เขียนของ ClickUp ถูกบล็อกผ่าน --disallowedTools ` +
-      `(ดู src/clickupTools.ts ว่าบล็อกครบไหมก่อนใช้งานจริง)\n`
-  );
+    `[pmctl] หมายเหตุ: ถ้า claude CLI เครื่องนี้ไม่รู้จัก --append-system-prompt/--permission-mode/--disallowedTools ` +
+    `ให้รัน "claude --help" เช็คชื่อ flag ปัจจุบันแล้วแก้ใน src/agents.ts\n` +
+    `[pmctl] PM จะใช้ ClickUp connector ของบัญชีนี้เอง — tool เขียนของ ClickUp ถูกบล็อกผ่าน --disallowedTools ` +
+    `(ดู src/clickupTools.ts ว่าบล็อกครบไหมก่อนใช้งานจริง)\n`;
 
-  return runClaude({ args, cwd: meta.worktreePath, logFile });
+  return { args, cwd: meta.worktreePath, logFile, notice };
+}
+
+/**
+ * Spawns the PM session in plain, non-interactive (headless) mode: output
+ * streams straight to stdout. This is the ONLY claude process pmctl itself
+ * spawns directly — PM is given bash access (via claude's own tools) and
+ * is instructed, in roles/pm.md, to spawn Dev and Tester itself as further
+ * `claude -p` subprocesses. pmctl does not orchestrate Dev/Tester directly;
+ * that is PM's job, by design, so PM is a real reasoning agent in the loop
+ * rather than a dumb pass-through.
+ *
+ * ClickUp access: PM uses your own already-authenticated ClickUp MCP
+ * connector to read the task (no separate token needed). Write access to
+ * ClickUp is blocked via --disallowedTools against every write-capable
+ * ClickUp tool name known at the time clickupTools.ts was written — see
+ * the warning in that file about this being a blocklist, not a structural
+ * guarantee the way withholding a credential would be.
+ *
+ * Used as a fallback when stdin/stdout aren't a real TTY (the interactive
+ * TUI in src/runView.tsx needs raw-mode terminal support); see src/cli.ts.
+ */
+export function spawnPmSession(
+  repoRoot: string,
+  meta: Meta,
+  permissionMode: string,
+  clickupRef: string
+): Promise<number> {
+  const plan = buildPmSessionPlan(repoRoot, meta, permissionMode, clickupRef);
+  console.log(plan.notice);
+  return runClaude({ args: plan.args, cwd: plan.cwd, logFile: plan.logFile });
 }
 
 /**

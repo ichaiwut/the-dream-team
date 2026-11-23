@@ -80,19 +80,23 @@ pmctl run add-dark-mode --clickup "..." --isolate
 
 `--isolate` expects a branch named `feature/<feature>` to already exist (override the name with `--branch <name>`), creates a separate git worktree (`../your-backend-repo-add-dark-mode`) checked out to it, and assigns it its own dev server port. If the branch doesn't exist, `pmctl run --isolate` fails immediately with a clear error instead of creating one for you.
 
-You can inspect progress at any point without interrupting PM:
+### Watching it work — one terminal, no second window needed
+
+When stdin/stdout are a real terminal, `pmctl run` itself opens a live Ink UI: PM's raw output streams in a panel on the left, and this feature's step log (the same thing `pmctl log`/`status` show) updates next to it on the right, polled once a second. `Ctrl+C` kills the PM session and exits; once PM finishes, press `q` or `Enter` to close the UI (its exit code becomes `pmctl run`'s own exit code). There's no second terminal to open for this — you're already looking at it.
+
+When stdin/stdout aren't a real TTY (piped output, CI, `pmctl run` invoked from another script), it falls back to the old plain text streaming straight to stdout — Ink needs real terminal raw-mode support that isn't available there.
+
+You can still inspect progress from elsewhere at any point without interrupting PM, e.g. from another terminal or machine:
 
 ```bash
 pmctl status                 # every feature currently in flight, with its last log entry
 pmctl log add-dark-mode      # full append-only log: who did what, and why
 pmctl plan add-dark-mode     # PM's plan.md
 pmctl report add-dark-mode   # Tester's report.md
-pmctl watch                  # live-refreshing view of every feature and which agent is doing what, right now
+pmctl watch                  # live Ink dashboard of every feature at once (not just the one you're running here)
 ```
 
-`pmctl watch` is meant to run in a second terminal alongside `pmctl run`. When stdin/stdout are a real terminal, it's an interactive TUI (built with [Ink](https://github.com/vadimdemedes/ink)): a feature list on the left (↑/↓ to select, `q` to quit) and that feature's live log on the right, color-coded by step. It polls the same `log.ndjson` files `pmctl log`/`status` read — no separate state, no extra process to keep in sync.
-
-When stdin/stdout aren't a TTY (piped output, CI, this tool running inside another script), it automatically falls back to a plain, non-interactive dashboard that just redraws on an interval — Ink needs real terminal raw-mode support that isn't available there. Force the plain mode yourself with `pmctl watch --plain`.
+`pmctl watch` is the multi-feature view — useful when several features are in flight (typically with `--isolate`) and you want one screen covering all of them, or you're checking in from a different terminal/session than the one running `pmctl run`. Same interactive-TUI/plain-fallback split as above (`pmctl watch --plain` forces the plain mode).
 
 If the ClickUp task changes after the feature has started:
 

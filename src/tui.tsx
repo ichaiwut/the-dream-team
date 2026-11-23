@@ -17,14 +17,14 @@ function listFeatures(repoRoot: string): string[] {
     .sort();
 }
 
-function stepColor(step: string): string {
+export function stepColor(step: string): string {
   if (step === "final_done" || step === "tester_done") return "green";
   if (step === "needs_po_attention") return "red";
   if (step === "iteration") return "yellow";
   return "cyan";
 }
 
-function actorBadge(actor: LogEntry["actor"]): string {
+export function actorBadge(actor: LogEntry["actor"]): string {
   switch (actor) {
     case "pm":
       return "PM";
