@@ -32,11 +32,11 @@ export function mdToHtml(md: string): string {
   const lines = md.split(/\r?\n/);
   let html = "";
   let i = 0;
-  let inList = false;
+  let openList: "ul" | "ol" | null = null;
   const closeList = () => {
-    if (inList) {
-      html += "</ul>\n";
-      inList = false;
+    if (openList) {
+      html += `</${openList}>\n`;
+      openList = null;
     }
   };
 
@@ -55,6 +55,34 @@ export function mdToHtml(md: string): string {
       const level = heading[1].length;
       html += `<h${level}>${inlineMd(escapeHtml(heading[2]))}</h${level}>\n`;
       i++;
+      continue;
+    }
+
+    // Fenced code block (```lang ... ```). plan.md's own "## Flow" section is
+    // exactly this — PM writes a real ```mermaid flowchart ...``` block —
+    // and without handling the fence explicitly it fell into the plain
+    // paragraph branch below, which joins every line with a single space and
+    // runs it through inline-bold/code — turning a diagram source into one
+    // unreadable run-on blob. A ```mermaid block renders as an actual
+    // diagram (mermaid.js, loaded in the page head); any other language (or
+    // none) renders as a plain preformatted block, line breaks intact.
+    const fence = /^```\s*([\w-]*)\s*$/.exec(trimmed);
+    if (fence) {
+      closeList();
+      const lang = fence[1].toLowerCase();
+      i++;
+      const codeLines: string[] = [];
+      while (i < lines.length && lines[i].trim() !== "```") {
+        codeLines.push(lines[i]);
+        i++;
+      }
+      i++; // skip the closing ``` (or run off the end if plan.md is missing one)
+      const code = escapeHtml(codeLines.join("\n"));
+      if (lang === "mermaid") {
+        html += `<pre class="mermaid">${code}</pre>\n`;
+      } else {
+        html += `<pre class="code-block"><code>${code}</code></pre>\n`;
+      }
       continue;
     }
 
@@ -78,11 +106,28 @@ export function mdToHtml(md: string): string {
     }
 
     if (/^[-*]\s+/.test(trimmed)) {
-      if (!inList) {
+      if (openList !== "ul") {
+        closeList();
         html += "<ul>\n";
-        inList = true;
+        openList = "ul";
       }
       html += `<li>${inlineMd(escapeHtml(trimmed.replace(/^[-*]\s+/, "")))}</li>\n`;
+      i++;
+      continue;
+    }
+
+    // Ordered list ("1. ", "2. ", ...) — plan.md's own "ขั้นตอนการทำงาน"
+    // steps are written this way. Without handling it, each numbered line
+    // fell into the plain-paragraph branch below and got joined with every
+    // following line into one run-on sentence ("1. Dev ... 2. Reviewer ...
+    // 3. Tester ..." all on one line) instead of staying a numbered list.
+    if (/^\d+\.\s+/.test(trimmed)) {
+      if (openList !== "ol") {
+        closeList();
+        html += "<ol>\n";
+        openList = "ol";
+      }
+      html += `<li>${inlineMd(escapeHtml(trimmed.replace(/^\d+\.\s+/, "")))}</li>\n`;
       i++;
       continue;
     }
@@ -95,7 +140,9 @@ export function mdToHtml(md: string): string {
       lines[i].trim() !== "" &&
       !/^#{1,6}\s/.test(lines[i].trim()) &&
       !/^[-*]\s+/.test(lines[i].trim()) &&
-      !lines[i].trim().startsWith("|")
+      !/^\d+\.\s+/.test(lines[i].trim()) &&
+      !lines[i].trim().startsWith("|") &&
+      !/^```/.test(lines[i].trim())
     ) {
       para.push(lines[i].trim());
       i++;
@@ -175,7 +222,7 @@ const STYLE = `
   th, td { border: 1px solid #333a45; padding: 6px 10px; text-align: left; vertical-align: top; }
   th { background: #1a1f29; }
   code { background: #1a1f29; padding: 1px 5px; border-radius: 4px; font-size: 0.9em; }
-  ul { margin: 8px 0; padding-left: 22px; }
+  ul, ol { margin: 8px 0; padding-left: 22px; }
   li { margin: 4px 0; }
   p { margin: 10px 0; }
 
@@ -204,7 +251,31 @@ const STYLE = `
   .plan-body {
     border: 1px solid #333a45; border-radius: 10px; padding: 18px 22px; background: #141822;
   }
+  pre.code-block {
+    background: #1a1f29; border: 1px solid #333a45; border-radius: 8px;
+    padding: 12px 14px; overflow-x: auto; font-size: 0.88rem;
+  }
+  pre.mermaid {
+    background: #fff; border-radius: 8px; padding: 12px; overflow-x: auto;
+    /* Light background: mermaid's default theme renders dark text/lines that
+       disappear against this page's otherwise-dark background. If mermaid.js
+       never loads (no internet), this still just shows the raw diagram
+       source as plain text — readable, if not rendered. */
+  }
 `;
+
+// Loaded from a CDN at view time (the user opens this file in their own
+// browser, which needs internet for this one script either way) — not
+// bundled, so pmctl itself stays dependency-free. If it fails to load (no
+// internet, CDN blocked), every ```mermaid block just stays visible as plain
+// text in its <pre> — degraded, not broken.
+const MERMAID_SCRIPT = `
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>
+  if (window.mermaid) {
+    mermaid.initialize({ startOnLoad: true, theme: "default" });
+  }
+</script>`;
 
 /**
  * Best-effort "open this file in whatever the OS considers the default
@@ -247,6 +318,7 @@ export function buildPlanHtml(opts: {
 <meta charset="utf-8">
 <title>Plan: ${escapeHtml(feature)}</title>
 <style>${STYLE}</style>
+${MERMAID_SCRIPT}
 </head>
 <body>
   <div class="wrap">
