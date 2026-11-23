@@ -7,6 +7,7 @@ import { Meta } from "./worktree.js";
 import { FILES, featureDir, featureFile } from "./paths.js";
 import { CLICKUP_WRITE_TOOLS } from "./clickupTools.js";
 import { ensureClaudeBashAllowRule } from "./claudeSettings.js";
+import { estimateTokens } from "./sessionStats.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROLES_DIR = path.join(__dirname, "..", "roles");
@@ -128,6 +129,13 @@ export interface PmSessionPlan {
   cwd: string;
   logFile: fs.WriteStream;
   notice: string;
+  /**
+   * Estimated tokens of prompt this invocation starts with (initial prompt
+   * + appended system prompt). PM runs in plain text mode and reports no
+   * usage of its own, so this is the one honest thing that can be said
+   * about its context: how much pmctl put in before it did anything.
+   */
+  promptTokens: number;
 }
 
 /**
@@ -281,7 +289,13 @@ export function buildPmSessionPlan(
     `ให้รัน claude แบบ interactive ในโฟลเดอร์นี้สักครั้ง กด allow ให้คำสั่ง claude -p แล้วเลือก "always allow" ` +
     `ตัว CLI จะเขียน syntax ที่ถูกต้องลงไฟล์เดียวกันนี้เอง\n`;
 
-  return { args, cwd: meta.worktreePath, logFile, notice };
+  return {
+    args,
+    cwd: meta.worktreePath,
+    logFile,
+    notice,
+    promptTokens: estimateTokens(initialPrompt) + estimateTokens(pmSystemPrompt),
+  };
 }
 
 /**

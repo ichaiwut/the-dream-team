@@ -22,6 +22,14 @@ import {
 } from "./pipeline.js";
 import { buildStageHtml, buildFinalReportHtml, openInBrowser, hasOpenQuestions } from "./planHtml.js";
 import { notify } from "./notify.js";
+import {
+  readSessionStats,
+  formatSessionStats,
+  estimateTokens,
+  formatEstimatedTokens,
+  ASSUMED_CONTEXT_WINDOW,
+  type SessionStats,
+} from "./sessionStats.js";
 
 const LOG_POLL_MS = 1000;
 const MAX_LINES = 2000;
@@ -183,6 +191,48 @@ function extractAgentText(raw: string): string[] {
   // The text carries real newlines once parsed; split so the panel wraps on
   // them instead of printing one enormous line.
   return splitLines(chunks.join("\n\n"));
+}
+
+/**
+ * The most recent brief PM logged for this agent — the `*_started` entry's
+ * reason, which roles/pm.md requires to say what was dispatched. Read from
+ * the end so that after an iteration the panel shows the current round's
+ * instruction, not the one from two rounds ago.
+ */
+function briefForAgent(log: LogEntry[], agent: SubAgent): string | null {
+  const step = `${agent}_started`;
+  for (let i = log.length - 1; i >= 0; i--) {
+    if (log[i].step === step) return log[i].reason || null;
+  }
+  return null;
+}
+
+/**
+ * Per-agent usage as a markdown table for the final report. Only the
+ * sub-agents appear: PM's own session runs in plain-text mode and reports
+ * no usage, so a row for it could only hold invented numbers. Returns ""
+ * when nothing is known, which buildFinalReportHtml drops rather than
+ * rendering an empty section.
+ */
+function buildStatsMarkdown(repoRoot: string, feature: string): string {
+  const rows: string[] = [];
+  for (const agent of ["dev", "reviewer", "tester"] as SubAgent[]) {
+    const stats = readSessionStats(featureFile(repoRoot, feature, AGENT_LOG_FILE[agent]));
+    if (!stats) continue;
+    rows.push(`| ${agent} | ${formatSessionStats(stats)}${stats.isError ? " (จบแบบ error)" : ""} |`);
+  }
+  if (rows.length === 0) return "";
+  return (
+    `| agent | context / ต้นทุน |\n|---|---|\n${rows.join("\n")}\n\n` +
+    `ตัวเลข context มาจาก \`--output-format json\` ของแต่ละ session (รวม cache read ด้วย เพราะเป็น context ที่โมเดลต้องอ่านจริง) ` +
+    `เปอร์เซ็นต์เทียบกับ context window 200k ซึ่งเป็นค่าที่สมมติไว้ ไม่ได้อ่านจากตัว CLI\n\n` +
+    `PM session ไม่มีตัวเลขเพราะรันแบบ plain text (\`-p\` เฉยๆ) ซึ่งไม่รายงาน usage กลับมาเลย`
+  );
+}
+
+function readSubAgentStats(repoRoot: string, feature: string, agent: SubAgent | null): SessionStats | null {
+  if (!agent) return null;
+  return readSessionStats(featureFile(repoRoot, feature, AGENT_LOG_FILE[agent]));
 }
 
 function readSubAgentLines(repoRoot: string, feature: string, agent: SubAgent | null): string[] {
@@ -388,6 +438,10 @@ function App({
   // the gate machinery can no longer see, so the PO needs to know the
   // history they're looking at has holes in it.
   const [skippedLogLines, setSkippedLogLines] = useState(0);
+  // Usage/cost for the sub-agent currently in view, and the prompt size
+  // pmctl handed the running PM invocation.
+  const [subStats, setSubStats] = useState<SessionStats | null>(null);
+  const [pmPromptTokens, setPmPromptTokens] = useState(0);
   // Free-text answers to a "คำถามถึง PO" section PM wrote into plan.md (see
   // src/planHtml.ts's hasOpenQuestions). Typed in-place on this same screen
   // ("a" key) rather than requiring the PO to edit plan.md by hand, then
@@ -527,6 +581,7 @@ function App({
     setActiveGate(null);
     setRunningPhase({ phase, startedAt: Date.now() });
     const plan = buildPmSessionPlan(repoRoot, meta, permissionMode, clickupRef, phase);
+    setPmPromptTokens(plan.promptTokens);
     plan.logFile.write(plan.notice);
 
     const child = spawnClaudeProcess(plan.args, plan.cwd);
@@ -645,6 +700,7 @@ function App({
           { heading: "สรุปงานจาก Dev", markdown: readStageMarkdown(repoRoot, meta.feature, "devSummary") },
           { heading: "ผลตรวจโค้ดจาก Reviewer", markdown: readStageMarkdown(repoRoot, meta.feature, "review") },
           { heading: "ผลทดสอบจาก Tester", markdown: readStageMarkdown(repoRoot, meta.feature, "report") },
+          { heading: "ต้นทุนและ context ของแต่ละ session", markdown: buildStatsMarkdown(repoRoot, meta.feature) },
         ],
         log: freshLog,
         generatedAt: new Date().toLocaleString("th-TH"),
@@ -696,6 +752,7 @@ function App({
       const agent = computeActiveAgent(freshLog);
       setSubAgent(agent);
       setSubLines(readSubAgentLines(repoRoot, meta.feature, agent));
+      setSubStats(readSubAgentStats(repoRoot, meta.feature, agent));
 
       // PM logs this when Dev/Reviewer/Tester hit a decision only the PO can
       // make (roles/pm.md's communication rules). The run keeps going, but
@@ -966,6 +1023,13 @@ function App({
 
   const checklist = computeChecklist(log);
   const subPanelTitle = subAgent ? AGENT_PANEL_TITLE[subAgent] : "SUB-AGENT (ยังไม่เริ่ม)";
+  // The brief PM logged when it dispatched this agent. PM composes the real
+  // prompt inside its own bash call, which pmctl never sees — but it is
+  // required to log what it dispatched, and that line is written through
+  // `pmctl log-append` now, so it arrives intact.
+  const subBrief = subAgent ? briefForAgent(log, subAgent) : null;
+  const subContextHeavy =
+    subStats?.contextTokens !== undefined && subStats.contextTokens > ASSUMED_CONTEXT_WINDOW * 0.75;
 
   // PM transcript, wrapped once and then either tailed (live) or windowed
   // (scrollback). The clamps are published to refs for the key handler,
@@ -1116,6 +1180,17 @@ function App({
               {pmWrapped.length} · q/Esc กลับ live)
             </Text>
           )}
+          {pmPromptTokens > 0 && (
+            // PM runs in plain-text print mode, which reports no usage at
+            // all — so rather than an empty meter, this states the part
+            // that is actually known: the prompt pmctl itself composed.
+            // Everything PM reads afterwards (spec, plan, sub-agent
+            // replies) adds to this and can't be counted from here.
+            <Text dimColor>
+              context เริ่มต้น ~{formatEstimatedTokens(pmPromptTokens)} tokens (prompt + system prompt ที่ pmctl ส่งให้ —
+              ประมาณการ ยังไม่รวมไฟล์ที่ PM อ่านเองระหว่างทาง)
+            </Text>
+          )}
           {lines.length === 0 && !done && <Text dimColor>(กำลังเริ่ม...)</Text>}
           {pmVisible.map((l, i) => (
             <Text key={i} wrap="truncate-end">
@@ -1149,6 +1224,28 @@ function App({
             <Text bold dimColor>
               {subPanelTitle}
             </Text>
+            {subStats && (
+              <Text color={subContextHeavy ? "red" : "gray"}>
+                {formatSessionStats(subStats)}
+                {subStats.isError ? " · จบแบบ error" : ""}
+              </Text>
+            )}
+            {subAgent && !subStats && <Text dimColor>context/สถิติ: ได้หลัง agent จบรอบ (--output-format json)</Text>}
+            {subBrief && (
+              // What PM actually asked this agent to do. Without it the
+              // panel is a wall of reply text with no statement of the
+              // task it's replying to.
+              <Box flexDirection="column">
+                <Text dimColor>โจทย์:</Text>
+                {wrapLine(subBrief, Math.max(10, subWidth - PANEL_INNER_PADDING))
+                  .slice(0, 3)
+                  .map((l, i) => (
+                    <Text key={i} color="cyan" wrap="truncate-end">
+                      {l}
+                    </Text>
+                  ))}
+              </Box>
+            )}
             {!subAgent && <Text dimColor>(PM ยังไม่ได้สั่ง Dev/Reviewer/Tester)</Text>}
             {subAgent && subLines.length === 0 && <Text dimColor>(รอผลลัพธ์...)</Text>}
             {wrapLines(subLines, subWidth - PANEL_INNER_PADDING)
