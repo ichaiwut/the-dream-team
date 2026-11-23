@@ -54,6 +54,43 @@ const RETRY_DELAYS_MS = [5000, 15000, 30000, 60000, 60000];
 // the old checklist (no times at all) gave you no way to answer.
 const SLOW_STEP_MS = 10 * 60 * 1000;
 
+/** What each PM invocation is there to do, for the "กำลังรัน" line. */
+const PHASE_LABEL: Record<PmPhase, string> = {
+  initial: "ดึง spec + วางแผน",
+  dev: "สั่ง Dev เขียนโค้ด",
+  reviewer: "สั่ง Reviewer ตรวจโค้ด",
+  tester: "สั่ง Tester รัน e2e",
+  final: "สรุปปิดงาน",
+  fullRunNoGate: "รันทุกขั้นตอนรวด (ไม่มี gate)",
+};
+
+/**
+ * How long a freshly-spawned PM can go without writing a log line before
+ * the TUI stops implying everything is fine and says what might be wrong.
+ *
+ * Booting `claude`, reading the role file and spec, and thinking before the
+ * first tool call genuinely takes a while, so an early silence means
+ * nothing. Past this it's worth naming the two things it's usually waiting
+ * on, because they look identical from outside: still working, or blocked
+ * on a tool-permission prompt that nothing in a headless `-p` session can
+ * ever answer.
+ */
+const PHASE_SILENT_HINT_MS = 90 * 1000;
+
+/**
+ * Output that suggests the sub-process is sitting on a permission decision.
+ * Treated as corroboration for the silence above, never as the trigger on
+ * its own: the exact wording belongs to the `claude` CLI and changes
+ * between versions, so a missed pattern must not mean a missed diagnosis.
+ */
+const PERMISSION_PATTERNS = [
+  /permission/i,
+  /do you want to proceed/i,
+  /allow rule/i,
+  /requested permissions/i,
+  /needs? your approval/i,
+];
+
 // Rows the chrome around the panels takes up: title line + its blank
 // margin line + each panel's own header line + its top/bottom border.
 const HEADER_ROWS = 2;
@@ -335,6 +372,17 @@ function App({
   // Which hand-off the run is parked at, null while it's moving. Drives
   // what the approval screen says and which phase approving it starts.
   const [activeGate, setActiveGate] = useState<Gate | null>(null);
+  // Which stage the running PM invocation was spawned to do, and when.
+  // The checklist can't answer this: it's derived from the log, so between
+  // "PO approves the Dev gate" and "PM writes reviewer_started" it still
+  // points at the finished stage, making a booting PM look like a stalled
+  // one. This is the TUI saying what it actually dispatched.
+  const [runningPhase, setRunningPhase] = useState<{ phase: PmPhase; startedAt: number } | null>(null);
+  // The artifact from the gate most recently approved. Kept so pressing y
+  // doesn't make the document vanish with no way back to it — the run
+  // carries on in the live view, but what you just approved is still one
+  // keypress away.
+  const [lastArtifact, setLastArtifact] = useState<{ label: string; path: string } | null>(null);
   // Free-text answers to a "คำถามถึง PO" section PM wrote into plan.md (see
   // src/planHtml.ts's hasOpenQuestions). Typed in-place on this same screen
   // ("a" key) rather than requiring the PO to edit plan.md by hand, then
@@ -381,6 +429,8 @@ function App({
    * didn't catch it — they now pause before logging, like the real CLI.)
    */
   const gateWatermarkRef = useRef(0);
+  /** Whether this invocation's output has mentioned permissions at all. */
+  const permissionSmellRef = useRef(false);
   // One notification per state change, not one per poll tick — the log line
   // that triggered it stays in the log forever, so without this the PO would
   // get a bell every second for the rest of the run.
@@ -442,6 +492,7 @@ function App({
       `pmctl: ${meta.feature} — ${gate.title}`,
       hasOpenQuestions(markdown) ? `${gate.question} (มีคำถามถึง PO — กด a เพื่อตอบ)` : gate.question
     );
+    setRunningPhase(null);
     setAwaitingApproval(true);
   }
 
@@ -453,6 +504,9 @@ function App({
    */
   function approveGate() {
     const next = activeGate?.nextPhase ?? "dev";
+    if (activeGate && planHtmlPath !== "") {
+      setLastArtifact({ label: activeGate.title, path: planHtmlPath });
+    }
     setAwaitingApproval(false);
     setLines([]); // fresh transcript for the next PM invocation
     startPhase(next);
@@ -466,6 +520,7 @@ function App({
     gateShownRef.current = false;
     gateWatermarkRef.current = readLog(repoRoot, meta.feature).length;
     setActiveGate(null);
+    setRunningPhase({ phase, startedAt: Date.now() });
     const plan = buildPmSessionPlan(repoRoot, meta, permissionMode, clickupRef, phase);
     plan.logFile.write(plan.notice);
 
@@ -473,10 +528,15 @@ function App({
     childRef.current = child;
     tailRef.current = "";
     let rawOutput = ""; // this invocation's own text only, to check for a transient-error pattern
+    permissionSmellRef.current = false;
 
     const onChunk = (chunk: Buffer) => {
       plan.logFile.write(chunk);
-      rawOutput += chunk.toString("utf8");
+      const asText = chunk.toString("utf8");
+      rawOutput += asText;
+      if (!permissionSmellRef.current && PERMISSION_PATTERNS.some((re) => re.test(asText))) {
+        permissionSmellRef.current = true;
+      }
       const text = tailRef.current + chunk.toString("utf8");
       const parts = splitLines(text);
       tailRef.current = parts.pop() ?? "";
@@ -567,6 +627,7 @@ function App({
    * read, keep, or send on.
    */
   function finishRun(freshLog: LogEntry[], exitCode: number) {
+    setRunningPhase(null);
     const htmlPath = featureFile(repoRoot, meta.feature, "finalHtml");
     let built = false;
     try {
@@ -772,6 +833,10 @@ function App({
       else if (input === "G") setPmScroll(null); // the bottom *is* live
       return;
     }
+    if (input === "v" && lastArtifact) {
+      openInBrowser(lastArtifact.path);
+      return;
+    }
     if (input === "[") {
       // Start where the live view already was, so entering scrollback never
       // jumps the text you were reading.
@@ -905,7 +970,11 @@ function App({
   pmVisibleRowsRef.current = visibleRows;
   const pmFirstVisible = pmScroll === null ? Math.max(0, pmWrapped.length - visibleRows) : Math.min(pmScroll, pmMaxScroll);
   const pmVisible = pmWrapped.slice(pmFirstVisible, pmFirstVisible + visibleRows);
-  const footerHint = done ? ", q/Enter ออก" : ", [ เลื่อนดูย้อนหลัง";
+  const footerHint = done
+    ? ", q/Enter ออก"
+    : lastArtifact
+      ? ", [ เลื่อนดูย้อนหลัง, v เปิดเอกสารที่เพิ่งอนุมัติ"
+      : ", [ เลื่อนดูย้อนหลัง";
   // Recomputed on every render, and the log poll re-renders once a second,
   // so these tick on their own without a second timer.
   const runAge = checklist.startedAt ? formatAge(checklist.startedAt) : null;
@@ -915,6 +984,15 @@ function App({
   // full e2e run) take longer than this — just the point where "is it stuck
   // or is it working?" becomes a fair question, so the number turns red
   // rather than staying quietly dim.
+  // Has the running invocation written any log line of its own yet? Uses
+  // the same watermark the gate machinery does, so "PM hasn't started" and
+  // "PM is working" are distinguished by evidence rather than elapsed time.
+  const loggedSincePhaseStart = runningPhase !== null && log.length > gateWatermarkRef.current;
+  const phaseLooksStuck =
+    runningPhase !== null &&
+    !done &&
+    !loggedSincePhaseStart &&
+    Date.now() - runningPhase.startedAt > PHASE_SILENT_HINT_MS;
   const currentIsSlow =
     checklist.currentSince !== null &&
     Date.now() - new Date(checklist.currentSince).getTime() > SLOW_STEP_MS &&
@@ -954,6 +1032,42 @@ function App({
             <Text bold color="red">
               ⚠ ต้องการให้ PO ตัดสินใจ — ดูคำตอบสุดท้ายของ PM
             </Text>
+          )}
+          {runningPhase && !done && (
+            <Box marginTop={1} flexDirection="column">
+              <Text bold color="cyan">
+                ▶ กำลังรัน: {PHASE_LABEL[runningPhase.phase]}
+              </Text>
+              <Text dimColor>
+                {loggedSincePhaseStart
+                  ? "PM กำลังทำงานอยู่ (ดูช่องขวา)"
+                  : `รอ PM เริ่มบันทึก log — ${formatAge(new Date(runningPhase.startedAt).toISOString())}`}
+              </Text>
+            </Box>
+          )}
+          {phaseLooksStuck && (
+            // The two reasons a stage goes quiet look identical from here,
+            // so name both rather than guessing: one is fine and one needs
+            // the PO to restart the run differently.
+            <Box marginTop={1} flexDirection="column">
+              <Text bold color="red">
+                ⚠ ยังไม่มี log ของขั้นตอนนี้นาน {formatAge(new Date(runningPhase!.startedAt).toISOString())}
+              </Text>
+              <Text color="red">
+                {permissionSmellRef.current
+                  ? "ในเอาต์พุตมีเรื่อง permission — เป็นไปได้สูงว่าค้างรอ approval ของ Bash tool ที่ตอบไม่ได้ในโหมด headless"
+                  : "อาจกำลังคิดอยู่จริงๆ หรือค้างรอ approval ของ tool ที่ตอบไม่ได้ในโหมด headless"}
+              </Text>
+              <Text dimColor>
+                ถ้าค้าง: Ctrl+C แล้วรันใหม่ด้วย --permission-mode bypassPermissions (กลับมาที่ gate เดิม ไม่เสียงานที่ทำไปแล้ว)
+              </Text>
+            </Box>
+          )}
+          {lastArtifact && !awaitingApproval && (
+            <Box marginTop={1} flexDirection="column">
+              <Text dimColor>อนุมัติล่าสุด: {lastArtifact.label}</Text>
+              <Text dimColor>กด v เปิดอ่านซ้ำในเบราว์เซอร์</Text>
+            </Box>
           )}
           {checklist.latest && (
             // What's actually happening right now, in the agent's own words
