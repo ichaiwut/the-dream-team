@@ -72,7 +72,10 @@ pmctl status                 # every feature currently in flight, with its last 
 pmctl log add-dark-mode      # full append-only log: who did what, and why
 pmctl plan add-dark-mode     # PM's plan.md
 pmctl report add-dark-mode   # Tester's report.md
+pmctl watch                  # live-refreshing view of every feature and which agent is doing what, right now
 ```
+
+`pmctl watch` is meant to run in a second terminal alongside `pmctl run` — it polls the same `log.ndjson` files on an interval (default 1.5s) and redraws a small dashboard: current step per feature, color-coded, with the last couple of entries as trailing context. It's not a full TUI like saaio's — no panes, no keyboard navigation — just enough to answer "what is each agent doing right now" without tailing raw PM output or reading files by hand.
 
 If the ClickUp task changes after the feature has started:
 

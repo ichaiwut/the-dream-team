@@ -7,6 +7,7 @@ import { fetchClickUpTask, taskToSpecMarkdown } from "./clickup.js";
 import { appendLog, formatLog, readLog } from "./log.js";
 import { featureDir, featureFile, stateRoot } from "./paths.js";
 import { spawnPmSession } from "./agents.js";
+import { watchFeatures } from "./watch.js";
 
 const repoRoot = process.cwd();
 const program = new Command();
@@ -100,6 +101,14 @@ program
   .action((feature: string) => {
     const file = featureFile(repoRoot, feature, "report");
     console.log(fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "(Tester ยังไม่เขียนผลเทส)");
+  });
+
+program
+  .command("watch")
+  .description("เปิดหน้าจอ live refresh ดูทุก feature + agent ตัวไหนกำลังทำอะไรอยู่ (เปิดอีก terminal คู่กับ pmctl run ได้)")
+  .option("--interval <ms>", "ความถี่ในการ refresh (ms)", "1500")
+  .action((opts: { interval: string }) => {
+    watchFeatures(repoRoot, Number(opts.interval));
   });
 
 program
