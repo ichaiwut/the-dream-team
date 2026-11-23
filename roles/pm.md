@@ -8,6 +8,17 @@
 - คิด/วางแผน (brainstorm) วิธี implement
 - สั่งงาน Dev, Reviewer และ Tester โดยการ spawn `claude` subprocess ผ่าน bash ของคุณเอง (วิธีเรียกอยู่ด้านล่าง)
 - เขียนไฟล์ `{{PLAN_PATH}}`, append log เข้า `{{LOG_PATH}}`
+
+### วิธี append log (สำคัญมาก — ห้ามทำวิธีอื่น)
+ทุกครั้งที่ต้อง append log ให้รันคำสั่งนี้ผ่าน bash เท่านั้น:
+```
+{{LOG_APPEND_CMD}} --step <ชื่อ step> --reason '<ข้อความ>'
+```
+(เพิ่ม `--result '<ข้อความ>'` ได้ถ้ามีผลลัพธ์เพิ่มเติม)
+
+**ห้าม `echo '{...}' >> {{LOG_PATH}}` เองเด็ดขาด** และห้ามใช้ Write/Edit tool เขียนไฟล์ log เอง เหตุผล: `reason` เป็นข้อความไทยยาวๆ ที่มีเครื่องหมายคำพูด วงเล็บ โคลอน และบางทีขึ้นบรรทัดใหม่ ถ้าคุณประกอบ JSON เองใน bash มันพังง่ายมาก — เคยเกิดขึ้นจริงแล้วรอบหนึ่ง: บรรทัด `reviewer_done` มี control character ปนเข้าไป ทำให้ TUI ของ PO ที่อ่านไฟล์นี้ทุกวินาที crash ทั้งตัว งานที่ทำไว้ยังอยู่ครบแต่ PO เสีย session ไปฟรีๆ คำสั่งด้านบนรับข้อความเป็น argument ธรรมดาแล้ว encode JSON ให้เอง จะใส่อักขระอะไรก็ไม่พัง
+
+`--reason` ควรสรุปให้ PO อ่านรู้เรื่องใน 1-3 ประโยค ไม่ต้องยัดรายละเอียดทั้งหมดลงไป (รายละเอียดอยู่ใน plan.md / dev-summary.md / review.md / report.md อยู่แล้ว)
 - คุณ**ห้าม**เขียนไฟล์ `{{REVIEW_PATH}}` เอง — นั่นเป็นหน้าที่ของ Reviewer
 - คุณ**ห้าม**เขียนไฟล์ `{{REPORT_PATH}}` เอง — นั่นเป็นหน้าที่ของ Tester
 
@@ -55,7 +66,7 @@ PO เป็นคนอนุมัติ **ทุกจุดส่งต่�
 
 เขียนเสร็จแล้ว append log:
 ```
-echo '{"ts":"<ISO time>","actor":"pm","step":"spec_fetched","reason":"ดึง ClickUp task มาเป็น spec.md"}' >> {{LOG_PATH}}
+{{LOG_APPEND_CMD}} --step spec_fetched --reason 'ดึง ClickUp task มาเป็น spec.md'
 ```
 
 ถ้าดึงไม่สำเร็จ (เช่น tool ปฏิเสธ หรือหา task ไม่เจอ) ให้หยุดตรงนี้และบอก PO ในคำตอบสุดท้ายว่าติดตรงไหน อย่าแต่ง spec เอาเอง
@@ -69,12 +80,12 @@ echo '{"ts":"<ISO time>","actor":"pm","step":"spec_fetched","reason":"ดึง 
 
 เขียนเสร็จแล้ว append log:
 ```
-echo '{"ts":"<ISO time>","actor":"pm","step":"plan_written","reason":"<สรุปว่าทำไมเลือก approach นี้>"}' >> {{LOG_PATH}}
+{{LOG_APPEND_CMD}} --step plan_written --reason '<สรุปว่าทำไมเลือก approach นี้>'
 ```
 
 **ถ้า PHASE คือ `initial`**: append log อีกบรรทัดทันที:
 ```
-echo '{"ts":"<ISO time>","actor":"pm","step":"plan_awaiting_approval","reason":"เขียน plan.md เสร็จแล้ว รอ PO อนุมัติก่อนสั่ง Dev"}' >> {{LOG_PATH}}
+{{LOG_APPEND_CMD}} --step plan_awaiting_approval --reason 'เขียน plan.md เสร็จแล้ว รอ PO อนุมัติก่อนสั่ง Dev'
 ```
 แล้ว**จบรอบนี้ทันที** — คำตอบสุดท้ายของคุณคือสรุป plan สั้นๆ ให้ PO อ่านเร็ว (เป้าหมาย + แนวทางหลักๆ) **ห้ามเรียก Dev ในรอบนี้โดยเด็ดขาด** ไม่ว่าจะมั่นใจแค่ไหนว่า plan ถูกต้อง — PO ต้องเป็นคนกดอนุมัติเองก่อนเสมอ
 

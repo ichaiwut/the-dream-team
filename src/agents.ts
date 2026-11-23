@@ -10,6 +10,13 @@ import { ensureClaudeBashAllowRule } from "./claudeSettings.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROLES_DIR = path.join(__dirname, "..", "roles");
+/**
+ * pmctl's own entry point, as an absolute path. PM shells out to this to
+ * append log lines, so it must not depend on `pmctl` being on PATH inside
+ * whatever environment the sub-process inherits — this is the same file
+ * that's already running.
+ */
+const CLI_ENTRY = path.join(__dirname, "cli.js");
 
 function fillTemplate(template: string, vars: Record<string, string>): string {
   let out = template;
@@ -26,6 +33,10 @@ function buildVars(repoRoot: string, meta: Meta): Record<string, string> {
     PLAN_PATH: path.join(dir, FILES.plan),
     ANSWERS_PATH: path.join(dir, FILES.answers),
     DEV_SUMMARY_PATH: path.join(dir, FILES.devSummary),
+    // Concrete, runnable command for appending a log line — see the
+    // log-append subcommand in src/cli.ts for why PM must not hand-encode
+    // the JSON itself.
+    LOG_APPEND_CMD: `node ${CLI_ENTRY} log-append ${meta.feature}`,
     REVIEW_PATH: path.join(dir, FILES.review),
     REPORT_PATH: path.join(dir, FILES.report),
     LOG_PATH: path.join(dir, FILES.log),

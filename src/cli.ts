@@ -2,7 +2,7 @@
 import { Command } from "commander";
 import fs from "node:fs";
 import { createIsolatedWorktree, loadMeta, removeWorktree, useCurrentCheckout } from "./worktree.js";
-import { appendLog, formatLog, readLog } from "./log.js";
+import { appendLog, formatLog, readLog, readLogSafe, type LogActor } from "./log.js";
 import { featureFile, stateRoot } from "./paths.js";
 import { spawnPmSession, spawnRefreshSpec } from "./agents.js";
 import { watchFeatures } from "./watch.js";
@@ -123,8 +123,42 @@ program
   .command("log <feature>")
   .description("ไล่ดู log การทำงานทั้งหมดของ feature นี้ (append-only, ไม่อยู่ใน ClickUp)")
   .action((feature: string) => {
-    console.log(formatLog(readLog(repoRoot, feature)));
+    const { entries, skipped } = readLogSafe(repoRoot, feature);
+    console.log(formatLog(entries));
+    if (skipped > 0) {
+      console.log(`\n(ข้าม ${skipped} บรรทัดที่ไม่ใช่ JSON ที่อ่านได้ — ดูไฟล์ log.ndjson ตรงๆ ถ้าต้องการตรวจสอบ)`);
+    }
   });
+
+/**
+ * How PM is told to write its own log lines. PM has no file-writing tool
+ * pointed at the log, so it used to append with `echo '{"ts":...}' >>`,
+ * hand-encoding JSON around multi-sentence Thai `reason` text in bash —
+ * which produced, in a real run, a line with a raw control character in it
+ * that crashed the TUI's once-a-second parse. The reader no longer dies on
+ * a bad line, but the better fix is not to generate one: here the fields
+ * arrive as ordinary argv strings and JSON.stringify does the encoding.
+ */
+program
+  .command("log-append <feature>")
+  .description(
+    "สำหรับ PM เท่านั้น: เพิ่มบรรทัด log หนึ่งบรรทัดแบบ encode JSON ให้ถูกต้องเอง " +
+      "(ใช้แทนการ echo JSON เข้าไฟล์เอง ซึ่งพังง่ายเมื่อ reason มีอักขระพิเศษ/ขึ้นบรรทัดใหม่)"
+  )
+  .requiredOption("--step <step>", "ชื่อ step เช่น dev_done, reviewer_done, iteration")
+  .requiredOption("--reason <reason>", "เหตุผล/สรุปของขั้นตอนนี้ (ข้อความธรรมดา ใส่ยาวได้ ไม่ต้อง escape เอง)")
+  .option("--actor <actor>", "ผู้บันทึก", "pm")
+  .option("--result <result>", "ผลลัพธ์เพิ่มเติม (ถ้ามี)")
+  .action(
+    (feature: string, opts: { step: string; reason: string; actor: string; result?: string }) => {
+      appendLog(repoRoot, feature, {
+        actor: opts.actor as LogActor,
+        step: opts.step,
+        reason: opts.reason,
+        ...(opts.result ? { result: opts.result } : {}),
+      });
+    }
+  );
 
 program
   .command("plan <feature>")

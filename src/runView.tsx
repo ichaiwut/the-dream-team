@@ -4,7 +4,7 @@ import { ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 import fs from "node:fs";
 import { Meta } from "./worktree.js";
-import { readLog, LogEntry } from "./log.js";
+import { readLog, readLogSafe, LogEntry } from "./log.js";
 import { featureFile, FILES } from "./paths.js";
 import { buildPmSessionPlan, spawnClaudeProcess, PmPhase } from "./agents.js";
 // PIPELINE/checklist logic lives in pipeline.ts so plan.html's flow chart
@@ -383,6 +383,11 @@ function App({
   // carries on in the live view, but what you just approved is still one
   // keypress away.
   const [lastArtifact, setLastArtifact] = useState<{ label: string; path: string } | null>(null);
+  // Lines in log.ndjson that aren't readable JSON. Shown rather than
+  // swallowed: a skipped line is a stage whose milestone the checklist and
+  // the gate machinery can no longer see, so the PO needs to know the
+  // history they're looking at has holes in it.
+  const [skippedLogLines, setSkippedLogLines] = useState(0);
   // Free-text answers to a "คำถามถึง PO" section PM wrote into plan.md (see
   // src/planHtml.ts's hasOpenQuestions). Typed in-place on this same screen
   // ("a" key) rather than requiring the PO to edit plan.md by hand, then
@@ -685,8 +690,9 @@ function App({
 
   useEffect(() => {
     const timer = setInterval(() => {
-      const freshLog = readLog(repoRoot, meta.feature);
+      const { entries: freshLog, skipped } = readLogSafe(repoRoot, meta.feature);
       setLog(freshLog);
+      setSkippedLogLines(skipped);
       const agent = computeActiveAgent(freshLog);
       setSubAgent(agent);
       setSubLines(readSubAgentLines(repoRoot, meta.feature, agent));
@@ -1025,6 +1031,11 @@ function App({
               </Text>
             );
           })}
+          {skippedLogLines > 0 && (
+            <Text bold color="red">
+              ⚠ log เสียหาย {skippedLogLines} บรรทัด (อ่านเป็น JSON ไม่ได้ ข้ามไป) — checklist อาจไม่ตรงกับงานจริง
+            </Text>
+          )}
           {checklist.iterationCount > 0 && (
             <Text color="yellow">↻ วนแก้แล้ว {checklist.iterationCount} รอบ</Text>
           )}
