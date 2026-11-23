@@ -1,88 +1,105 @@
 # pmctl
 
-ตัวควบคุม PO → PM(agent) → Dev(agent) → Tester(agent) ที่รันบนเครื่องตัวเอง สร้างขึ้นมาจากแนวคิดของ [saaio](https://saaio.dev/) แต่ตัด TUI/multi-worker orchestration ออก เหลือแค่สายงานเดียวที่คุณ (PO) เป็นคนเริ่ม
+A local CLI orchestrator for a strict PO → PM → Dev → Tester agent chain, built on top of [Claude Code](https://claude.com/claude-code). Inspired by [saaio](https://saaio.dev/)'s worktree-per-flow model, scoped down to a single accountable chain instead of a multi-worker TUI.
 
-## กติกาที่ออกแบบไว้ (จากการคุยกัน)
+## Why
 
-- **PO คุยกับ PM เท่านั้น** — ไม่คุยกับ Dev/Tester ตรงๆ
-- **ClickUp เขียนได้แค่ PO** — PM อ่านอย่างเดียว (บังคับจริงด้วยการไม่ส่ง `CLICKUP_API_TOKEN` เข้าไปใน environment ของ PM/Dev/Tester เลย ไม่ใช่แค่บอกในคำสั่ง)
-- **log การทำงานไม่เก็บใน ClickUp** — เก็บเป็นไฟล์ local แบบ append-only (`.pmctl/<feature>/log.ndjson`) ตามแนวทางของ saaio เอง
-- **PM ต้องเขียนแผนงาน (`plan.md`) ก่อนสั่ง Dev ทุกครั้ง** — มีเป้าหมาย/แนวทาง/flow/รายการไฟล์ที่กระทบ
-- **Tester ต้องรัน unit แล้วค่อย e2e จริง ไม่ใช่แค่อ่านโค้ด** — เขียนผลเป็น `report.md` แยกจาก `plan.md`
-- Dev/Tester ไม่รู้จัก PO เลย เป็นแค่ subprocess ที่ PM เรียก
+Giving one agent full autonomy over a feature — writing the code, testing it, and deciding it's done — means the same model grades its own work. `pmctl` splits that into three roles with a hard communication boundary, and gives the human (PO) a durable, auditable trail without needing to sit in on every exchange:
 
-## ติดตั้ง
+- **PO** (you) — owns the spec in ClickUp and signs off on acceptance testing. Never talks to Dev or Tester directly.
+- **PM** (agent) — reads the spec, writes a plan before any code is touched, dispatches Dev and Tester, and is the only role that talks to either of them.
+- **Dev** (agent) — implements against PM's instructions inside an isolated git worktree. Has no path to reach the PO.
+- **Tester** (agent) — independently verifies Dev's work by actually running tests (unit, then real e2e), not by reading the diff and approving it.
+
+## Design rules this tool enforces
+
+| Rule | How it's enforced |
+|---|---|
+| ClickUp is write-only for the PO; PM only reads it | `CLICKUP_API_TOKEN` is read once by the `pmctl` parent process and deliberately never forwarded into the environment of any spawned `claude` subprocess — PM, Dev, and Tester have no credential to write back even if instructed to |
+| The working log is never stored in ClickUp | Every milestone is appended to a local, append-only `.pmctl/<feature>/log.ndjson` — plain files the PO can read any time without waiting on a summary |
+| PM must plan before dispatching Dev | `roles/pm.md` requires `plan.md` (goal, approach, flow, affected files) to exist before Dev is invoked, for every feature regardless of size |
+| Tester must prove it, not assert it | `roles/tester.md` forbids a pass verdict based on reading code; it must run the unit suite, then execute real e2e scenarios against a running instance, and cite command output as evidence in `report.md` |
+| Plan and test report are separate artifacts | `plan.md` is owned by PM, `report.md` is owned by Tester — each one documents one side of the work |
+
+## Requirements
+
+- Node.js >= 18
+- [Claude Code](https://claude.com/claude-code) (`claude` CLI) installed and authenticated
+- A git repository to run features against (this repo, `pmctl` itself, is just where the tool's source lives — you run it *inside* the project you're building)
+- A ClickUp API token with read access to the tasks you'll use as specs
+
+## Install
 
 ```bash
-cd pmctl
+git clone git@github.com:ichaiwut/the-dream-team.git
+cd the-dream-team
 npm install
 npm run build
-npm link   # ทำให้เรียก `pmctl` ได้จากทุกที่ (หรือจะรันผ่าน `node dist/cli.js` ตรงๆ ก็ได้)
+npm link        # exposes `pmctl` globally; or invoke node dist/cli.js directly without linking
 ```
 
-ต้องมี [Claude Code](https://claude.com/claude-code) (`claude` CLI) ติดตั้งและ login ไว้แล้วในเครื่อง
+## Before first real use
 
-## ⚠️ สิ่งที่ต้องเช็คเองก่อนใช้จริง
-
-**flag ของ `claude` CLI ที่ใช้ใน `src/agents.ts` และ `roles/pm.md`** (`--append-system-prompt`, `--permission-mode`, `--output-format`) เขียนจากความเข้าใจทั่วไปของ Claude Code ตอนที่เขียนโค้ดนี้ — เวอร์ชันที่ลงในเครื่องคุณอาจมีชื่อ flag ต่างไปบ้าง ให้รัน:
+The `claude` CLI flags this tool shells out to (`--append-system-prompt`, `--permission-mode`, `--output-format`) were written against a general understanding of Claude Code's interface at the time this was built. Flag names can change between versions. Before running this against real work:
 
 ```bash
 claude --help
 ```
 
-เทียบก่อนใช้งานจริงรอบแรก ถ้า flag ไม่ตรง ให้แก้ตรง `buildVars`/args ใน `src/agents.ts` ให้ตรงกับเวอร์ชันจริง (จุดเดียวที่ประกอบคำสั่งเรียก Dev/Tester คือใน `roles/pm.md` เพราะ PM เป็นคนเรียกเองผ่าน bash — ถ้า flag เปลี่ยน แก้ไฟล์นี้พอ ไม่ต้องแก้โค้ด TypeScript)
+and compare against what's used in `src/agents.ts` and `roles/pm.md`. If something's changed, `roles/pm.md` is the only file to edit — PM constructs its own calls to Dev and Tester from that template via its bash tool, so a flag change doesn't require touching any TypeScript.
 
-`--permission-mode acceptEdits` คือค่า default ที่ตั้งไว้ให้ทำงานไม่ต้องกด approve ทุก edit (เพราะรันแบบ unattended) — ถ้าอยากเข้มกว่านี้/หลวมกว่านี้ ปรับด้วย `--permission-mode` ตอนรัน `pmctl run`
+`--permission-mode acceptEdits` is the default, so file edits are accepted without an interactive prompt (this runs unattended). Pass `--permission-mode <mode>` to `pmctl run` to tighten or loosen that for a given feature.
 
-## ใช้งาน
+## Usage
 
 ```bash
-export CLICKUP_API_TOKEN=pk_xxxxx   # token ของ PO เท่านั้น ไม่แชร์ให้ PM
+export CLICKUP_API_TOKEN=pk_xxxxx     # the PO's own token — never shared with PM
 
-cd your-repo
+cd your-backend-repo
 pmctl run add-dark-mode --clickup 86abc123de
 ```
 
-จะเกิดขึ้น:
-1. สร้าง git worktree ใหม่ (`../your-repo-add-dark-mode`) + branch `feature/add-dark-mode` + จองพอร์ตอัตโนมัติ
-2. ดึง ClickUp task มาเป็น `.pmctl/add-dark-mode/spec.md` (snapshot ครั้งเดียว)
-3. เริ่ม PM session (`claude` subprocess ที่มี bash tool) ให้ทำตาม `roles/pm.md`: วางแผน → เขียน plan.md → สั่ง Dev → สั่ง Tester (รัน e2e จริง) → วนแก้ถ้า fail → เขียนสรุปจบ
+This will:
 
-ระหว่างทาง/หลังจบ เช็คได้ตลอดโดยไม่ต้องรบกวน PM:
+1. Create a new git worktree (`../your-backend-repo-add-dark-mode`) on branch `feature/add-dark-mode`, with an auto-assigned dev server port
+2. Pull the ClickUp task into `.pmctl/add-dark-mode/spec.md` as a one-time snapshot
+3. Start a PM session (a `claude` subprocess with its own bash access) that follows `roles/pm.md`: plan → write `plan.md` → dispatch Dev → dispatch Tester (real e2e) → loop on failure → final summary
+
+You can inspect progress at any point without interrupting PM:
 
 ```bash
-pmctl status              # ดูทุก feature ที่กำลังทำ + log ล่าสุด
-pmctl log add-dark-mode   # ไล่ดู log แบบเต็ม (ใครทำอะไร เหตุผลอะไร)
-pmctl plan add-dark-mode  # อ่านแผนงานของ PM
-pmctl report add-dark-mode # อ่านผลเทสของ Tester
+pmctl status                 # every feature currently in flight, with its last log entry
+pmctl log add-dark-mode      # full append-only log: who did what, and why
+pmctl plan add-dark-mode     # PM's plan.md
+pmctl report add-dark-mode   # Tester's report.md
 ```
 
-ถ้า ClickUp task ถูกแก้ไขหลังเริ่มงานไปแล้ว:
+If the ClickUp task changes after the feature has started:
 
 ```bash
 pmctl refresh-spec add-dark-mode --clickup 86abc123de
 ```
 
-เสร็จงาน merge แล้วเก็บกวาด:
+Once merged, clean up the worktree:
 
 ```bash
-pmctl clean add-dark-mode   # ลบ worktree (log/plan/report ใน .pmctl/ ยังอยู่ ไม่หาย)
+pmctl clean add-dark-mode    # removes the worktree; .pmctl/<feature>/ (log, plan, report) is kept
 ```
 
-## โครงสร้างไฟล์ที่เกิดขึ้นต่อ 1 feature
+## Files produced per feature
 
 ```
 .pmctl/add-dark-mode/
-  meta.json       # branch, worktree path, port, clickup task id
-  spec.md         # snapshot จาก ClickUp (PM อ่านอย่างเดียว)
-  plan.md         # เขียนโดย PM ก่อนสั่ง Dev
-  report.md       # เขียนโดย Tester หลังรัน e2e
-  log.ndjson      # append-only, ทุก milestone ของ PM/Dev/Tester
-  pm-session.log  # raw transcript เต็มของ PM session (เผื่อ debug ลึก)
+  meta.json       # branch, worktree path, port, ClickUp task id
+  spec.md         # ClickUp snapshot — PM reads this, never writes to it
+  plan.md         # written by PM before Dev starts
+  report.md       # written by Tester after running real tests
+  log.ndjson      # append-only; every PM/Dev/Tester milestone, with reasons
+  pm-session.log  # raw transcript of the PM session, for deep debugging
 ```
 
-## ข้อจำกัดที่รู้อยู่แล้ว (บอกไว้ตรงๆ)
+## Known limitations
 
-- "ClickUp อ่านอย่างเดียว" เป็นการบังคับระดับโค้ด (ไม่ส่ง token ให้ subprocess) ไม่ใช่ API scope ของ ClickUp เอง — ถ้าใครเอา token ไปรันเองนอกเครื่องมือนี้ก็เขียนได้ปกติ
-- ยังไม่ได้ลองรันกับ `claude` CLI จริงในสภาพแวดล้อมนี้ (sandbox นี้ไม่มี `claude` ติดตั้ง) — โค้ดส่วน worktree/port/clickup/log ทดสอบแล้วทำงานได้จริง ส่วน PM/Dev/Tester loop ทดสอบได้แค่ logic การประกอบคำสั่ง ยังไม่ได้ end-to-end กับ claude CLI จริง — ลองรอบแรกแล้วดูว่า flag/behavior ตรงไหนต้องปรับ
-- ยังไม่มีการจำกัดว่า Dev agent จะรันคำสั่งอันตรายในเครื่องได้ (`--permission-mode acceptEdits` ยอมรับการแก้ไฟล์อัตโนมัติ) — ถ้าเป็นงานที่กระทบข้อมูลสำคัญ ควรปรับเป็นโหมดที่เข้มกว่านี้หรือรีวิวเองก่อน merge จริง
+- "Read-only ClickUp access" is enforced at the code level (no token forwarded to subprocesses), not by a ClickUp API scope. Anyone running the same token outside this tool has full write access as normal.
+- Not yet validated end-to-end against a live `claude` CLI — the environment this was built in doesn't have Claude Code installed. The worktree/port/ClickUp/log mechanics are tested and working; the PM→Dev→Tester loop has only been verified at the level of "does it assemble the right command," not a real run. Expect to adjust flags or prompt wording on first use.
+- No sandboxing beyond what `--permission-mode` gives you. `acceptEdits` auto-accepts file changes from Dev with no human in the loop — for anything touching production data or paying customers, use a stricter permission mode or review the diff before merging regardless of what Tester reports.
