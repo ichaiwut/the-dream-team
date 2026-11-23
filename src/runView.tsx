@@ -243,6 +243,12 @@ function App({
   const childRef = useRef<ChildProcessByStdio<null, Readable, Readable> | null>(null);
   const tailRef = useRef(""); // carries a partial last line between chunks
   const retryTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  // Which phase the currently-running PM invocation is, and whether the
+  // approval screen has already been shown for it — both read by the log
+  // poll below so it can react to `plan_awaiting_approval` the instant it
+  // appears, without waiting on the child process's own "close" event.
+  const currentPhaseRef = useRef<PmPhase | null>(null);
+  const approvalShownRef = useRef(false);
 
   function clearPendingRetry() {
     if (retryTimeoutRef.current) {
@@ -292,6 +298,8 @@ function App({
   }
 
   function startPhase(phase: PmPhase, attempt: number = 1) {
+    currentPhaseRef.current = phase;
+    if (phase === "initial") approvalShownRef.current = false;
     const plan = buildPmSessionPlan(repoRoot, meta, permissionMode, clickupRef, phase);
     plan.logFile.write(plan.notice);
 
@@ -321,6 +329,14 @@ function App({
       if (tailRef.current) {
         setLines((prev) => prev.concat(tailRef.current));
         tailRef.current = "";
+      }
+      if (approvalShownRef.current) {
+        // The log poll below already saw `plan_awaiting_approval` land and
+        // killed this process on purpose — this "close" is that kill
+        // arriving, not a real failure or a normal exit. Don't re-process
+        // it as either (that would re-show the approval screen a second
+        // time, or show it as "done"/retry a process we killed ourselves).
+        return;
       }
       const exitCode = code ?? 0;
 
@@ -378,6 +394,29 @@ function App({
       const agent = computeActiveAgent(freshLog);
       setSubAgent(agent);
       setSubLines(readSubAgentLines(repoRoot, meta.feature, agent));
+
+      // PM is instructed (roles/pm.md) to log `plan_awaiting_approval` and
+      // stop immediately — but a real run showed it sometimes keeps going
+      // past that point (more bash tool calls, more reasoning) instead of
+      // actually exiting. Waiting for the process to close on its own before
+      // showing the approval screen meant the TUI just sat on the old
+      // checklist view looking stuck, even though the one thing the PO is
+      // waiting on (plan.md) was already done. React the instant the log
+      // line appears instead: kill the still-running process (it has
+      // nothing left it should be doing) and show the approval screen now.
+      if (
+        currentPhaseRef.current === "initial" &&
+        !approvalShownRef.current &&
+        freshLog.some((e) => e.step === "plan_awaiting_approval") &&
+        !freshLog.some((e) => e.step === "dev_started")
+      ) {
+        approvalShownRef.current = true;
+        clearPendingRetry();
+        if (childRef.current && !childRef.current.killed) {
+          childRef.current.kill();
+        }
+        showApprovalScreen(freshLog);
+      }
     }, LOG_POLL_MS);
     return () => clearInterval(timer);
   }, [repoRoot, meta.feature]);
