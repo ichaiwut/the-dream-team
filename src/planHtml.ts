@@ -44,7 +44,7 @@ const TABLE_SEPARATOR_RE = /^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
  * extending it is fine as plan.md's shape evolves, but it only has to track
  * what PM is instructed to produce, not arbitrary markdown.
  */
-export function mdToHtml(md: string): string {
+export function mdToHtml(md: string, demoteHeadings: number = 0): string {
   const lines = md.split(/\r?\n/);
   let html = "";
   let i = 0;
@@ -68,7 +68,10 @@ export function mdToHtml(md: string): string {
     const heading = /^(#{1,6})\s+(.*)$/.exec(trimmed);
     if (heading) {
       closeList();
-      const level = heading[1].length;
+      // Demoted when this markdown is embedded under a section heading of
+      // the page's own (the final report), so the document's structure
+      // nests instead of every "##" competing with the section it's inside.
+      const level = Math.min(6, heading[1].length + demoteHeadings);
       html += `<h${level}>${inlineMd(escapeHtml(heading[2]))}</h${level}>\n`;
       i++;
       continue;
@@ -275,6 +278,10 @@ const STYLE = `
     background: #1a1f29; border: 1px solid #333a45; border-radius: 8px;
     padding: 12px 14px; overflow-x: auto; font-size: 0.88rem;
   }
+  table.timeline { font-size: 0.86rem; }
+  table.timeline .tl-when { white-space: nowrap; color: #9aa0a6; width: 1%; }
+  table.timeline .tl-actor { color: #7cc7ff; width: 1%; }
+  table.timeline .tl-result { color: #8be3ab; }
   pre.mermaid {
     background: #fff; border-radius: 8px; padding: 12px; overflow-x: auto;
     /* Light background: mermaid's default theme renders dark text/lines that
@@ -321,16 +328,123 @@ export function openInBrowser(filePath: string): void {
   }
 }
 
+/**
+ * One artifact per gate. Same page for all of them — pipeline flow chart on
+ * top, the stage's own markdown below — because what the PO is doing at
+ * every gate is the same thing: see where the run is, read what the last
+ * agent produced, decide whether it goes forward.
+ */
+export function buildStageHtml(opts: {
+  feature: string;
+  clickupRef: string;
+  heading: string;
+  bodyHeading: string;
+  markdown: string;
+  log: LogEntry[];
+  generatedAt: string;
+  /** Rendered after the body — the timeline of what's happened so far. */
+  withTimeline?: boolean;
+}): string {
+  return buildPlanHtml({
+    feature: opts.feature,
+    clickupRef: opts.clickupRef,
+    planMarkdown: opts.markdown,
+    log: opts.log,
+    generatedAt: opts.generatedAt,
+    heading: opts.heading,
+    bodyHeading: opts.bodyHeading,
+    withTimeline: opts.withTimeline,
+  });
+}
+
+/**
+ * Renders the log as a readable timeline — who did what, when, and why.
+ * The log is the only place the whole run exists end to end; without this
+ * it's a .ndjson file nobody opens.
+ */
+function buildTimeline(log: LogEntry[]): string {
+  if (log.length === 0) return "<p>(ยังไม่มีบันทึก)</p>";
+  const rows = log
+    .map((e) => {
+      const when = new Date(e.ts).toLocaleString("th-TH");
+      const result = e.result ? `<br><span class="tl-result">${escapeHtml(e.result)}</span>` : "";
+      return (
+        `<tr><td class="tl-when">${escapeHtml(when)}</td>` +
+        `<td class="tl-actor">${escapeHtml(e.actor)}</td>` +
+        `<td><code>${escapeHtml(e.step)}</code><br>${escapeHtml(e.reason)}${result}</td></tr>`
+      );
+    })
+    .join("\n");
+  return `<table class="timeline"><thead><tr><th>เมื่อไหร่</th><th>ใคร</th><th>อะไร</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+/**
+ * The end-of-run deliverable: everything the chain produced, in one page.
+ * Until now a finished run left the PO with a log file, four markdown files
+ * scattered in a dot-directory, and a terminal that had already scrolled
+ * past the interesting part — nothing you could open, read top to bottom,
+ * or send to anyone. Sections with no content are skipped rather than
+ * rendered empty, so a run that ended early still produces a usable page.
+ */
+export function buildFinalReportHtml(opts: {
+  feature: string;
+  clickupRef: string;
+  port: number;
+  sections: { heading: string; markdown: string }[];
+  log: LogEntry[];
+  generatedAt: string;
+}): string {
+  const { feature, clickupRef, port, sections, log, generatedAt } = opts;
+  const body = sections
+    .filter((s) => s.markdown.trim() !== "")
+    .map((s) => `<h2>${escapeHtml(s.heading)}</h2><div class="plan-body">${mdToHtml(s.markdown, 1)}</div>`)
+    .join("\n");
+
+  return `<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<title>รายงานสรุป: ${escapeHtml(feature)}</title>
+<style>${STYLE}</style>
+${MERMAID_SCRIPT}
+</head>
+<body>
+  <div class="wrap">
+    <h1>รายงานสรุป — ${escapeHtml(feature)} (${escapeHtml(clickupRef)})</h1>
+    <div class="meta">สร้างเมื่อ ${escapeHtml(generatedAt)}</div>
+    <div class="banner">
+      งานผ่านครบทุกขั้นตอนแล้ว — ขั้นต่อไปคือ PO ทดสอบ acceptance เอง
+      ${port ? `(dev server: <code>http://localhost:${port}/</code>)` : ""}
+    </div>
+
+    <h2>สถานะ pipeline</h2>
+    ${buildFlowChart(log)}
+
+    ${body}
+
+    <h2>ไทม์ไลน์ทั้งหมด</h2>
+    ${buildTimeline(log)}
+  </div>
+</body>
+</html>`;
+}
+
 export function buildPlanHtml(opts: {
   feature: string;
   clickupRef: string;
   planMarkdown: string;
   log: LogEntry[];
   generatedAt: string;
+  heading?: string;
+  bodyHeading?: string;
+  withTimeline?: boolean;
 }): string {
   const { feature, clickupRef, planMarkdown, log, generatedAt } = opts;
+  const heading = opts.heading ?? "Plan";
+  const bodyHeading = opts.bodyHeading ?? "เนื้อหา plan";
   const flowChart = buildFlowChart(log);
   const planBody = mdToHtml(planMarkdown);
+  const timeline = opts.withTimeline ? `<h2>ไทม์ไลน์ทั้งหมด</h2>${buildTimeline(log)}` : "";
   const qaBanner = hasOpenQuestions(planMarkdown)
     ? `<div class="banner qa-banner">⚠ PM มีคำถามถึง PO ใน plan นี้ (ดูหัวข้อ "คำถามถึง PO" ด้านล่าง) — ` +
       `หน้านี้อ่านอย่างเดียว ตอบตรงนี้ไม่ได้ กลับไปที่เทอร์มินัลที่รัน <code>pmctl run</code> แล้วกด <code>a</code> ` +
@@ -341,13 +455,13 @@ export function buildPlanHtml(opts: {
 <html lang="th">
 <head>
 <meta charset="utf-8">
-<title>Plan: ${escapeHtml(feature)}</title>
+<title>${escapeHtml(heading)}: ${escapeHtml(feature)}</title>
 <style>${STYLE}</style>
 ${MERMAID_SCRIPT}
 </head>
 <body>
   <div class="wrap">
-    <h1>Plan — ${escapeHtml(feature)} (${escapeHtml(clickupRef)})</h1>
+    <h1>${escapeHtml(heading)} — ${escapeHtml(feature)} (${escapeHtml(clickupRef)})</h1>
     <div class="meta">สร้างเมื่อ ${escapeHtml(generatedAt)} — ไฟล์นี้เป็นสแนปช็อตแบบ static</div>
     <div class="banner">อนุมัติ/ยกเลิก plan นี้ที่หน้าจอ <code>pmctl run</code> ในเทอร์มินัล (y/Enter อนุมัติ, n ยกเลิก, a พิมพ์คำตอบก่อนอนุมัติ) — หน้านี้มีไว้อ่านอย่างเดียว</div>
     ${qaBanner}
@@ -355,10 +469,11 @@ ${MERMAID_SCRIPT}
     <h2>สถานะ pipeline</h2>
     ${flowChart}
 
-    <h2>เนื้อหา plan</h2>
+    <h2>${escapeHtml(bodyHeading)}</h2>
     <div class="plan-body">
       ${planBody}
     </div>
+    ${timeline}
   </div>
 </body>
 </html>`;

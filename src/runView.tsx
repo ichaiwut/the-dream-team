@@ -5,13 +5,21 @@ import type { Readable } from "node:stream";
 import fs from "node:fs";
 import { Meta } from "./worktree.js";
 import { readLog, LogEntry } from "./log.js";
-import { featureFile } from "./paths.js";
+import { featureFile, FILES } from "./paths.js";
 import { buildPmSessionPlan, spawnClaudeProcess, PmPhase } from "./agents.js";
 // PIPELINE/checklist logic lives in pipeline.ts so plan.html's flow chart
 // (planHtml.ts) computes the exact same checklist the TUI shows here,
 // instead of drifting out of sync with a second copy of this logic.
-import { computeChecklist, checklistColor, checklistMark, formatAge } from "./pipeline.js";
-import { buildPlanHtml, openInBrowser, hasOpenQuestions } from "./planHtml.js";
+import {
+  computeChecklist,
+  checklistColor,
+  checklistMark,
+  formatAge,
+  openGate,
+  phaseAfterLog,
+  type Gate,
+} from "./pipeline.js";
+import { buildStageHtml, buildFinalReportHtml, openInBrowser, hasOpenQuestions } from "./planHtml.js";
 import { notify } from "./notify.js";
 
 const LOG_POLL_MS = 1000;
@@ -92,12 +100,59 @@ function computeActiveAgent(log: LogEntry[]): SubAgent | null {
 /** Each sub-agent's session log is overwritten (`tee`, not `tee -a`) on every
  * fresh invocation by roles/pm.md, so reading it whole on every poll always
  * reflects that agent's current/latest round rather than every past one. */
+/**
+ * PM tees each sub-agent's reply here with `--output-format json`, so the
+ * file is a JSON envelope, not prose: the panel was rendering the raw thing
+ * — `"ttft_ms":1900`, `"credential_expires_at"`, every newline as a literal
+ * `\n` — which made the one place you could read what Dev or Tester
+ * actually said the least readable thing on screen. Pull the reply text out
+ * and show that instead.
+ *
+ * Shape varies by CLI version (`result`, `text`, or a `content` array of
+ * blocks), and a run can tee several objects one after another, so this
+ * takes whatever it recognises and falls back to the raw text when it
+ * recognises nothing — a readable-but-ugly panel beats an empty one.
+ */
+function extractAgentText(raw: string): string[] {
+  const chunks: string[] = [];
+  for (const candidate of raw.split(/\n(?=\{)/)) {
+    const trimmed = candidate.trim();
+    if (!trimmed.startsWith("{")) {
+      if (trimmed) chunks.push(trimmed);
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+      const text =
+        typeof parsed.result === "string"
+          ? parsed.result
+          : typeof parsed.text === "string"
+            ? parsed.text
+            : Array.isArray(parsed.content)
+              ? (parsed.content as { text?: string }[]).map((b) => b?.text ?? "").join("")
+              : null;
+      if (text !== null) {
+        chunks.push(text);
+        const err = parsed.is_error === true || parsed.subtype === "error";
+        if (err) chunks.push("(agent จบแบบ error — ดู log เต็มในไฟล์ session)");
+      } else {
+        chunks.push(trimmed);
+      }
+    } catch {
+      chunks.push(trimmed);
+    }
+  }
+  // The text carries real newlines once parsed; split so the panel wraps on
+  // them instead of printing one enormous line.
+  return splitLines(chunks.join("\n\n"));
+}
+
 function readSubAgentLines(repoRoot: string, feature: string, agent: SubAgent | null): string[] {
   if (!agent) return [];
   const file = featureFile(repoRoot, feature, AGENT_LOG_FILE[agent]);
   if (!fs.existsSync(file)) return [];
   try {
-    return splitLines(fs.readFileSync(file, "utf8"));
+    return extractAgentText(fs.readFileSync(file, "utf8"));
   } catch {
     return [];
   }
@@ -116,21 +171,48 @@ function readSubAgentLines(repoRoot: string, feature: string, agent: SubAgent | 
  *   - plan.md exists and Dev was already dispatched at some point -> treat
  *     the plan as already (implicitly) approved and continue from Dev
  */
-type ResumeDecision = PmPhase | "awaitingApprovalResume";
+type ResumeDecision = PmPhase | "gateResume" | "alreadyDone";
 
+/**
+ * What `pmctl run` should do when pointed at a feature that already has
+ * state on disk. A run parked at any gate reopens that gate immediately
+ * rather than spawning anything — the PO was being asked a question when
+ * the previous run ended, and the question is still open.
+ */
 function determineResumePhase(repoRoot: string, feature: string): ResumeDecision {
   const planPath = featureFile(repoRoot, feature, "plan");
   if (!fs.existsSync(planPath)) return "initial";
   const log = readLog(repoRoot, feature);
-  return log.some((e) => e.step === "dev_started") ? "continueAfterApproval" : "awaitingApprovalResume";
+  if (openGate(log)) return "gateResume";
+  const next = phaseAfterLog(log);
+  return next === "done" ? "alreadyDone" : next;
 }
 
-function readPlanPreview(repoRoot: string, feature: string): string {
-  const planPath = featureFile(repoRoot, feature, "plan");
+/** Heading the stage's own content gets, in its artifact and on screen. */
+const STAGE_BODY_HEADING: Record<Gate["source"], string> = {
+  plan: "เนื้อหา plan",
+  devSummary: "สรุปงานจาก Dev",
+  review: "ผลตรวจโค้ดจาก Reviewer",
+  report: "ผลทดสอบจาก Tester",
+};
+
+/**
+ * The markdown a gate asks the PO to read. A missing file is reported as
+ * such rather than thrown: an agent that skipped writing its report is a
+ * real thing that happens, and the gate still has to open so the PO can
+ * decide what to do about it — being told "no file" is itself the answer
+ * to "what did Dev produce?".
+ */
+function readStageMarkdown(repoRoot: string, feature: string, source: Gate["source"]): string {
+  const file = featureFile(repoRoot, feature, source);
+  const name = FILES[source];
   try {
-    return fs.existsSync(planPath) ? fs.readFileSync(planPath, "utf8") : "(ไม่พบ plan.md)";
+    if (!fs.existsSync(file)) {
+      return `# ไม่พบไฟล์ ${name}\n\nขั้นตอนนี้ควรเขียน \`${name}\` ไว้ แต่ไม่มีไฟล์นี้อยู่จริง — agent อาจข้ามไป\n\nดูรายละเอียดที่เกิดขึ้นจริงได้จากช่อง PM SESSION ในเทอร์มินัล หรือ log`;
+    }
+    return fs.readFileSync(file, "utf8");
   } catch {
-    return "(อ่าน plan.md ไม่สำเร็จ)";
+    return `# อ่าน ${name} ไม่สำเร็จ`;
   }
 }
 
@@ -248,6 +330,10 @@ function App({
   // shown, since the top is where the summary/overview lives.
   const [planScroll, setPlanScroll] = useState(0);
   const [planHtmlPath, setPlanHtmlPath] = useState("");
+  const [finalHtmlPath, setFinalHtmlPath] = useState("");
+  // Which hand-off the run is parked at, null while it's moving. Drives
+  // what the approval screen says and which phase approving it starts.
+  const [activeGate, setActiveGate] = useState<Gate | null>(null);
   // Free-text answers to a "คำถามถึง PO" section PM wrote into plan.md (see
   // src/planHtml.ts's hasOpenQuestions). Typed in-place on this same screen
   // ("a" key) rather than requiring the PO to edit plan.md by hand, then
@@ -275,7 +361,10 @@ function App({
   // poll below so it can react to `plan_awaiting_approval` the instant it
   // appears, without waiting on the child process's own "close" event.
   const currentPhaseRef = useRef<PmPhase | null>(null);
-  const approvalShownRef = useRef(false);
+  // Whether the gate for the invocation now running has already been opened
+  // — reset by startPhase, so each stage gets exactly one gate even though
+  // the step that opens it stays in the log forever.
+  const gateShownRef = useRef(false);
   // One notification per state change, not one per poll tick — the log line
   // that triggered it stays in the log forever, so without this the PO would
   // get a bell every second for the rest of the run.
@@ -289,33 +378,39 @@ function App({
   }
 
   /**
-   * Spawns one PM invocation for the given phase and wires up its output —
-   * shared between the initial mount and the second invocation fired after
-   * the PO approves the plan (see the "y" key handling in useInput below).
-   * Only "initial" can end in the approval prompt instead of "done": that's
-   * the only phase where PM is instructed to stop short of Dev.
+   * Parks the run at a gate: builds that stage's HTML artifact next to its
+   * markdown source, best-effort opens it in the browser, notifies, and
+   * switches the TUI into the full-screen review-and-approve view.
+   *
+   * Every hand-off in the chain comes through here — plan, Dev's summary,
+   * the code review, the test report, and a failed iteration — so the PO
+   * reads the same shape of page and presses the same keys at each, rather
+   * than approving a plan once and then being shown nothing until the run
+   * is over.
+   *
+   * The HTML is a convenience, never the source of truth: with no GUI, no
+   * browser, or no opener binary, nothing opens and the terminal's own
+   * scrollable view below carries the same content.
    */
-  /**
-   * Builds plan.html (full markdown render + a real flow chart of the
-   * pipeline, see planHtml.ts) next to plan.md, best-effort opens it in the
-   * OS's default browser, and switches the TUI into the approval screen.
-   * The HTML file is a convenience, not the source of truth — if nothing
-   * opens (no GUI/SSH session/no opener binary), the terminal's own
-   * full-screen plan view below is still there as the fallback.
-   */
-  function showApprovalScreen(freshLog: LogEntry[]) {
-    const planMarkdown = readPlanPreview(repoRoot, meta.feature);
-    setPlanPreview(planMarkdown);
+  function showGate(gate: Gate, freshLog: LogEntry[]) {
+    const markdown = readStageMarkdown(repoRoot, meta.feature, gate.source);
+    setActiveGate(gate);
+    setPlanPreview(markdown);
     setPlanScroll(0);
 
-    const htmlPath = featureFile(repoRoot, meta.feature, "planHtml");
+    const htmlPath = featureFile(repoRoot, meta.feature, gate.artifact);
     try {
-      const html = buildPlanHtml({
+      const html = buildStageHtml({
         feature: meta.feature,
         clickupRef,
-        planMarkdown,
+        heading: gate.title,
+        bodyHeading: STAGE_BODY_HEADING[gate.source],
+        markdown,
         log: freshLog,
         generatedAt: new Date().toLocaleString("th-TH"),
+        // Everything past the plan is a mid-run checkpoint, where "how did
+        // we get here" is part of the decision.
+        withTimeline: gate.source !== "plan",
       });
       fs.writeFileSync(htmlPath, html, "utf8");
       setPlanHtmlPath(htmlPath);
@@ -325,20 +420,34 @@ function App({
       setPlanHtmlPath("");
     }
 
-    // The one moment in a whole run where nothing moves until a human comes
-    // back — exactly the moment worth interrupting them for.
+    // Nothing moves until a human comes back — exactly the moment worth
+    // interrupting them for.
     notify(
-      `pmctl: ${meta.feature} รออนุมัติ plan`,
-      hasOpenQuestions(planMarkdown)
-        ? "PM เขียน plan เสร็จแล้วและมีคำถามถึง PO — กด a เพื่อตอบ หรือ y เพื่ออนุมัติ"
-        : "PM เขียน plan เสร็จแล้ว รอ PO กด y เพื่ออนุมัติ"
+      `pmctl: ${meta.feature} — ${gate.title}`,
+      hasOpenQuestions(markdown) ? `${gate.question} (มีคำถามถึง PO — กด a เพื่อตอบ)` : gate.question
     );
     setAwaitingApproval(true);
   }
 
+  /**
+   * The PO said yes at whichever gate is open: start the stage that gate
+   * leads to. An `iteration` gate leads back to Dev rather than onward,
+   * which is the whole reason the loop-back is a decision and not something
+   * PM does by itself.
+   */
+  function approveGate() {
+    const next = activeGate?.nextPhase ?? "dev";
+    setAwaitingApproval(false);
+    setLines([]); // fresh transcript for the next PM invocation
+    startPhase(next);
+  }
+
   function startPhase(phase: PmPhase, attempt: number = 1) {
     currentPhaseRef.current = phase;
-    if (phase === "initial") approvalShownRef.current = false;
+    // A fresh invocation is past whichever gate opened it, so the gate
+    // machinery starts listening again from here.
+    gateShownRef.current = false;
+    setActiveGate(null);
     const plan = buildPmSessionPlan(repoRoot, meta, permissionMode, clickupRef, phase);
     plan.logFile.write(plan.notice);
 
@@ -369,12 +478,12 @@ function App({
         setLines((prev) => prev.concat(tailRef.current));
         tailRef.current = "";
       }
-      if (approvalShownRef.current) {
-        // The log poll below already saw `plan_awaiting_approval` land and
+      if (gateShownRef.current) {
+        // The log poll below already saw this stage's gate step land and
         // killed this process on purpose — this "close" is that kill
         // arriving, not a real failure or a normal exit. Don't re-process
-        // it as either (that would re-show the approval screen a second
-        // time, or show it as "done"/retry a process we killed ourselves).
+        // it as either (that would re-show the gate a second time, or show
+        // it as "done"/retry a process we killed ourselves).
         return;
       }
       const exitCode = code ?? 0;
@@ -395,31 +504,79 @@ function App({
       }
 
       const freshLog = readLog(repoRoot, meta.feature);
-      const reachedApprovalPoint =
-        phase === "initial" &&
-        exitCode === 0 &&
-        freshLog.some((e) => e.step === "plan_awaiting_approval") &&
-        !freshLog.some((e) => e.step === "dev_started");
-      if (reachedApprovalPoint) {
-        showApprovalScreen(freshLog);
-      } else {
-        // The run is over either way — if you walked away expecting to come
-        // back to a finished feature, this is what tells you it's time.
-        notify(
-          `pmctl: ${meta.feature} ${exitCode === 0 ? "จบงานแล้ว" : "จบแบบมี error"}`,
-          exitCode === 0
-            ? "ทุกขั้นตอนเสร็จ — กลับมาดูผลและทดสอบ acceptance ได้"
-            : `PM session จบด้วย exit code ${exitCode}`
-        );
-        setDone({ code: exitCode });
+      // PM exited on its own at the end of its stage (the normal case when
+      // it obeys "stop now" rather than needing the poll below to kill it).
+      const parked = exitCode === 0 ? openGate(freshLog) : null;
+      if (parked) {
+        gateShownRef.current = true;
+        showGate(parked.gate, freshLog);
+        return;
       }
+      if (exitCode === 0 && freshLog.some((e) => e.step === "final_done")) {
+        finishRun(freshLog, exitCode);
+        return;
+      }
+      // The run is over either way — if you walked away expecting to come
+      // back to a finished feature, this is what tells you it's time.
+      notify(
+        `pmctl: ${meta.feature} ${exitCode === 0 ? "จบงานแล้ว" : "จบแบบมี error"}`,
+        exitCode === 0
+          ? "ทุกขั้นตอนเสร็จ — กลับมาดูผลและทดสอบ acceptance ได้"
+          : `PM session จบด้วย exit code ${exitCode}`
+      );
+      setDone({ code: exitCode });
     });
+  }
+
+  /**
+   * End of the line: builds report.html out of everything the chain
+   * produced (plan, Dev's summary, the review, the test report, and the
+   * full timeline) and opens it. A finished run used to leave the PO with
+   * a scrolled-past terminal and a dot-directory — nothing to actually
+   * read, keep, or send on.
+   */
+  function finishRun(freshLog: LogEntry[], exitCode: number) {
+    const htmlPath = featureFile(repoRoot, meta.feature, "finalHtml");
+    let built = false;
+    try {
+      const html = buildFinalReportHtml({
+        feature: meta.feature,
+        clickupRef,
+        port: meta.port,
+        sections: [
+          { heading: "แผนงาน (plan.md)", markdown: readStageMarkdown(repoRoot, meta.feature, "plan") },
+          { heading: "สรุปงานจาก Dev", markdown: readStageMarkdown(repoRoot, meta.feature, "devSummary") },
+          { heading: "ผลตรวจโค้ดจาก Reviewer", markdown: readStageMarkdown(repoRoot, meta.feature, "review") },
+          { heading: "ผลทดสอบจาก Tester", markdown: readStageMarkdown(repoRoot, meta.feature, "report") },
+        ],
+        log: freshLog,
+        generatedAt: new Date().toLocaleString("th-TH"),
+      });
+      fs.writeFileSync(htmlPath, html, "utf8");
+      setFinalHtmlPath(htmlPath);
+      openInBrowser(htmlPath);
+      built = true;
+    } catch {
+      setFinalHtmlPath("");
+    }
+    notify(
+      `pmctl: ${meta.feature} จบงานแล้ว`,
+      built ? "เปิดรายงานสรุป report.html ให้แล้ว — เหลือ PO ทดสอบ acceptance เอง" : "ทุกขั้นตอนเสร็จแล้ว"
+    );
+    setDone({ code: exitCode });
   }
 
   useEffect(() => {
     const resume = determineResumePhase(repoRoot, meta.feature);
-    if (resume === "awaitingApprovalResume") {
-      showApprovalScreen(readLog(repoRoot, meta.feature));
+    const resumeLog = readLog(repoRoot, meta.feature);
+    if (resume === "gateResume") {
+      const parked = openGate(resumeLog)!;
+      gateShownRef.current = true;
+      showGate(parked.gate, resumeLog);
+    } else if (resume === "alreadyDone") {
+      // Nothing left to run — rebuild the report rather than re-dispatching
+      // a finished pipeline.
+      finishRun(resumeLog, 0);
     } else {
       startPhase(resume);
     }
@@ -452,27 +609,34 @@ function App({
         notify(`pmctl: ${meta.feature} ต้องการให้ PO ตัดสินใจ`, entry?.reason ?? "ดูคำตอบสุดท้ายของ PM");
       }
 
-      // PM is instructed (roles/pm.md) to log `plan_awaiting_approval` and
-      // stop immediately — but a real run showed it sometimes keeps going
-      // past that point (more bash tool calls, more reasoning) instead of
-      // actually exiting. Waiting for the process to close on its own before
-      // showing the approval screen meant the TUI just sat on the old
-      // checklist view looking stuck, even though the one thing the PO is
-      // waiting on (plan.md) was already done. React the instant the log
-      // line appears instead: kill the still-running process (it has
-      // nothing left it should be doing) and show the approval screen now.
-      if (
-        currentPhaseRef.current === "initial" &&
-        !approvalShownRef.current &&
-        freshLog.some((e) => e.step === "plan_awaiting_approval") &&
-        !freshLog.some((e) => e.step === "dev_started")
-      ) {
-        approvalShownRef.current = true;
-        clearPendingRetry();
-        if (childRef.current && !childRef.current.killed) {
-          childRef.current.kill();
+      // PM is instructed (roles/pm.md) to log its stage's step and stop
+      // immediately — but a real run showed it sometimes keeps going past
+      // that point (more bash tool calls, more reasoning, and at worst
+      // dispatching the *next* agent, which is exactly the hand-off the PO
+      // is supposed to approve) instead of actually exiting. Waiting for
+      // the process to close on its own left the TUI sitting on a stale
+      // checklist looking stuck while the thing the PO was waiting on was
+      // already written. React the instant the log line appears: kill the
+      // still-running invocation — it has nothing left it should be doing —
+      // and open the gate now. This is also what stops a disobedient PM
+      // from running the whole chain in one go.
+      if (!gateShownRef.current && currentPhaseRef.current !== "fullRunNoGate") {
+        const parked = openGate(freshLog);
+        if (parked) {
+          gateShownRef.current = true;
+          clearPendingRetry();
+          if (childRef.current && !childRef.current.killed) {
+            childRef.current.kill();
+          }
+          showGate(parked.gate, freshLog);
+        } else if (freshLog.some((e) => e.step === "final_done")) {
+          gateShownRef.current = true;
+          clearPendingRetry();
+          if (childRef.current && !childRef.current.killed) {
+            childRef.current.kill();
+          }
+          finishRun(freshLog, 0);
         }
-        showApprovalScreen(freshLog);
       }
     }, LOG_POLL_MS);
     return () => clearInterval(timer);
@@ -509,9 +673,7 @@ function App({
           }
         }
         setAnswering(false);
-        setAwaitingApproval(false);
-        setLines([]); // fresh transcript for the post-approval PM invocation
-        startPhase("continueAfterApproval");
+        approveGate();
         return;
       }
       if (key.return) {
@@ -539,9 +701,7 @@ function App({
         setAnswerText("");
         setAnswering(true);
       } else if (input === "y" || key.return) {
-        setAwaitingApproval(false);
-        setLines([]); // fresh transcript for the post-approval PM invocation
-        startPhase("continueAfterApproval");
+        approveGate();
       } else if (input === "n") {
         setAwaitingApproval(false);
         setDone({ code: 2, rejected: true });
@@ -630,7 +790,10 @@ function App({
       <Box flexDirection="column" width={columns} height={rows}>
         <Box>
           <Text bold>pmctl run — {meta.feature}</Text>
-          <Text dimColor> (branch={meta.branch}) — plan.md รออนุมัติ</Text>
+          <Text dimColor>
+            {" "}
+            (branch={meta.branch}) — {activeGate?.title ?? "รออนุมัติ"}
+          </Text>
         </Box>
         <Box
           marginTop={1}
@@ -640,21 +803,23 @@ function App({
           paddingX={1}
         >
           <Text bold color="yellow">
-            กด y หรือ Enter เพื่ออนุมัติและสั่ง Dev ต่อ · a พิมพ์คำตอบให้ PM ก่อนอนุมัติ · n ยกเลิก (แก้ plan.md เองได้แล้วรัน
-            pmctl run ใหม่) · ↑/↓ หรือ j/k เลื่อน · space/f หน้าถัดไป · b หน้าก่อนหน้า · g/G บนสุด/ล่างสุด
+            {activeGate?.question ?? "อนุมัติให้ทำต่อไหม"} — y/Enter อนุมัติ · a พิมพ์คำตอบให้ PM ก่อนอนุมัติ · n หยุดไว้ก่อน
+          </Text>
+          <Text dimColor>
+            ↑/↓ หรือ j/k เลื่อน · space/f หน้าถัดไป · b หน้าก่อนหน้า · g/G บนสุด/ล่างสุด
           </Text>
           {hasQuestions && (
             <Text bold color="red">
-              ⚠ PM มีคำถามถึง PO ในแผนนี้ — กด a เพื่อพิมพ์คำตอบก่อนอนุมัติ
+              ⚠ มีคำถามถึง PO อยู่ในเอกสารนี้ — กด a เพื่อพิมพ์คำตอบก่อนอนุมัติ
             </Text>
           )}
           {planHtmlPath ? (
             <Text dimColor>
-              เปิด flow chart + plan แบบเต็ม (พยายามเปิดเบราว์เซอร์ให้แล้ว): file://{planHtmlPath}
+              เปิดฉบับเต็ม + flow chart ในเบราว์เซอร์ให้แล้ว: file://{planHtmlPath}
             </Text>
           ) : (
             <Text dimColor color="red">
-              สร้าง/เปิด plan.html ไม่สำเร็จ — ดู plan ที่เลื่อนได้ด้านล่างแทน
+              สร้าง/เปิดไฟล์ HTML ไม่สำเร็จ — อ่านจากที่เลื่อนได้ด้านล่างแทน
             </Text>
           )}
           <Text dimColor>
@@ -806,9 +971,12 @@ function App({
               -- จบแล้ว (exit code {done.code}) --
             </Text>
           )}
+          {done && !done.rejected && finalHtmlPath !== "" && (
+            <Text color="green">รายงานสรุป: file://{finalHtmlPath}</Text>
+          )}
           {done && done.rejected && (
             <Text bold color="red">
-              -- ยกเลิกแล้ว แก้ plan.md เองแล้วรัน pmctl run ใหม่เพื่อขอ approve อีกรอบ --
+              -- หยุดไว้ที่ขั้นตอนนี้ — แก้ไฟล์ของขั้นตอนนั้นเองแล้วรัน pmctl run ใหม่ จะกลับมาถามที่เดิม --
             </Text>
           )}
         </Box>

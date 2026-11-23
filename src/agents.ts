@@ -25,14 +25,19 @@ function buildVars(repoRoot: string, meta: Meta): Record<string, string> {
     SPEC_PATH: path.join(dir, FILES.spec),
     PLAN_PATH: path.join(dir, FILES.plan),
     ANSWERS_PATH: path.join(dir, FILES.answers),
+    DEV_SUMMARY_PATH: path.join(dir, FILES.devSummary),
     REVIEW_PATH: path.join(dir, FILES.review),
     REPORT_PATH: path.join(dir, FILES.report),
     LOG_PATH: path.join(dir, FILES.log),
     WORKTREE_PATH: meta.worktreePath,
     PORT: String(meta.port),
-    DEV_ROLE_PATH: path.join(ROLES_DIR, "dev.md"),
-    REVIEWER_ROLE_PATH: path.join(ROLES_DIR, "reviewer.md"),
-    TESTER_ROLE_PATH: path.join(ROLES_DIR, "tester.md"),
+    // Rendered copies, not the originals in roles/ — see renderSubAgentRoles
+    // below. PM reads these with its own Read tool and pastes the content
+    // into each sub-agent's --append-system-prompt verbatim, so any
+    // {{VAR}} left unfilled would reach the sub-agent as literal braces.
+    DEV_ROLE_PATH: path.join(dir, "roles", "dev.md"),
+    REVIEWER_ROLE_PATH: path.join(dir, "roles", "reviewer.md"),
+    TESTER_ROLE_PATH: path.join(dir, "roles", "tester.md"),
     // Where PM tees each sub-agent's raw --output-format json reply, purely
     // so src/runView.tsx can tail a readable transcript per agent. PM still
     // reads the JSON from its own bash tool's stdout as before — `tee` just
@@ -46,6 +51,28 @@ function buildVars(repoRoot: string, meta: Meta): Record<string, string> {
     // permission level for all four roles, not just told to PM in prose.
     CLICKUP_DISALLOWED_TOOLS: CLICKUP_WRITE_TOOLS.join(","),
   };
+}
+
+/**
+ * Writes template-filled copies of the Dev/Reviewer/Tester role files into
+ * the feature's own state dir, and returns nothing — buildVars already
+ * points DEV_ROLE_PATH and friends at these copies.
+ *
+ * PM hands each sub-agent its role by reading the file and pasting the text
+ * into --append-system-prompt (it can't use `$(cat ...)`: Claude Code's Bash
+ * tool refuses command substitution). That means whatever is in the file is
+ * what the sub-agent sees, character for character — so a `{{DEV_SUMMARY_PATH}}`
+ * left in there arrives as literal braces and the sub-agent has no idea
+ * where to write. Only pm.md was ever filled in; these three were passed
+ * through raw, which was fine only as long as they contained no variables.
+ */
+function renderSubAgentRoles(dir: string, vars: Record<string, string>): void {
+  const outDir = path.join(dir, "roles");
+  fs.mkdirSync(outDir, { recursive: true });
+  for (const name of ["dev.md", "reviewer.md", "tester.md"]) {
+    const template = fs.readFileSync(path.join(ROLES_DIR, name), "utf8");
+    fs.writeFileSync(path.join(outDir, name), fillTemplate(template, vars), "utf8");
+  }
 }
 
 interface RunClaudeOptions {
@@ -105,37 +132,76 @@ export interface PmSessionPlan {
  *     all. Used for the non-interactive/headless fallback (spawnPmSession
  *     below), since there's no terminal there for a human to approve with.
  */
-export type PmPhase = "initial" | "continueAfterApproval" | "fullRunNoGate";
+export type PmPhase = "initial" | "dev" | "reviewer" | "tester" | "final" | "fullRunNoGate";
+
+/**
+ * The stage each gated phase covers, as a sentence PM gets verbatim. Every
+ * one of these ends the same way: do this stage, log it, stop. The PO is
+ * asked between each, so a phase that "helpfully" runs the next stage too
+ * silently removes a checkpoint the PO is waiting at.
+ */
+const PHASE_INSTRUCTION: Record<Exclude<PmPhase, "fullRunNoGate">, string> = {
+  initial:
+    `ทำตามบทบาท PM ของคุณเฉพาะขั้นตอน 0-1 เท่านั้น ` +
+    `(ดึง spec จาก ClickUp เขียน spec.md -> วางแผน -> เขียน plan.md) ` +
+    `แล้วหยุดทันที รอ PO อนุมัติ ห้ามสั่ง Dev ในรอบนี้เด็ดขาด`,
+  dev:
+    `ทำเฉพาะขั้นตอน 2 (สั่ง Dev) เท่านั้น — สั่ง Dev หนึ่งรอบ รอผล อ่านไฟล์สรุปของ Dev ` +
+    `แล้ว append log "step":"dev_done" พร้อมสรุปสั้นๆ แล้ว**หยุดทันที** ` +
+    `**ห้ามสั่ง Reviewer ในรอบนี้เด็ดขาด** ไม่ว่าโค้ดจะดูเรียบร้อยแค่ไหน — PO ต้องอ่านสรุปของ Dev แล้วกดอนุมัติก่อนเสมอ`,
+  reviewer:
+    `ทำเฉพาะขั้นตอน 3 (สั่ง Reviewer ตรวจโค้ด) เท่านั้น — สั่ง Reviewer หนึ่งรอบ อ่านผลจาก review.md ` +
+    `แล้ว append log "step":"reviewer_done" (ถ้า PASS) หรือ "step":"iteration" (ถ้า FAIL) แล้ว**หยุดทันที** ` +
+    `**ห้ามสั่ง Tester และห้ามสั่ง Dev แก้ต่อในรอบนี้เด็ดขาด** — PO ต้องอ่านผลตรวจแล้วกดอนุมัติก่อนเสมอ`,
+  tester:
+    `ทำเฉพาะขั้นตอน 4 (สั่ง Tester) เท่านั้น — สั่ง Tester หนึ่งรอบ อ่านผลจาก report.md ` +
+    `แล้ว append log "step":"tester_done" (ถ้าผ่าน) หรือ "step":"iteration" (ถ้า fail) แล้ว**หยุดทันที** ` +
+    `**ห้ามสั่ง Dev แก้ต่อในรอบนี้เด็ดขาด** — PO ต้องอ่านผลเทสต์แล้วกดอนุมัติก่อนเสมอ`,
+  final:
+    `ทำเฉพาะขั้นตอน 6 (จบงาน) เท่านั้น — เขียน section "## สถานะสุดท้าย" ต่อท้าย plan.md ` +
+    `แล้ว append log "step":"final_done" แล้วหยุด ไม่ต้องสั่ง agent ตัวไหนอีก`,
+};
+
+/** Wire name for a phase, as it appears on the `PHASE:` line PM reads. */
+const PHASE_WIRE_NAME: Record<PmPhase, string> = {
+  initial: "initial",
+  dev: "dev",
+  reviewer: "reviewer",
+  tester: "tester",
+  final: "final",
+  fullRunNoGate: "full-run-no-gate",
+};
 
 function buildInitialPrompt(phase: PmPhase, clickupRef: string, vars: Record<string, string>): string {
-  if (phase === "continueAfterApproval") {
-    return (
-      `PHASE: continue-after-approval\n` +
-      `spec.md (${vars.SPEC_PATH}) และ plan.md (${vars.PLAN_PATH}) มีอยู่แล้วจากรอบก่อนหน้า และ PO อนุมัติ plan แล้ว ` +
-      `ก่อนอื่น เช็คไฟล์ ${vars.ANSWERS_PATH} ก่อน — ถ้ามีอยู่และไม่ว่าง แปลว่า PO พิมพ์ตอบคำถามที่คุณถามไว้ใน plan.md ` +
-      `(หัวข้อ "คำถามถึง PO" หรือใกล้เคียง) ใช้ Read tool อ่านคำตอบนั้นก่อน แล้วเพิ่ม section "## คำตอบจาก PO" ต่อท้าย ` +
-      `plan.md เก็บคำตอบไว้เป็นหลักฐาน ก่อนสั่ง Dev ให้นำคำตอบไปปรับคำสั่งที่ส่งให้ Dev ด้วย (ถ้าไม่มีไฟล์นี้หรือว่าง แปลว่า ` +
-      `PO อนุมัติโดยไม่ตอบคำถาม ให้ใช้วิจารณญาณของคุณเองต่อไปตามที่เขียนไว้ใน plan.md เดิม) ` +
-      `ข้ามขั้นตอน 0 และ 1 ไปเลย ไปเริ่มที่ขั้นตอน 2 (สั่ง Dev) ทันที ทำต่อจนจบทุกขั้นตอน ` +
-      `(สั่ง Dev -> สั่ง Reviewer -> สั่ง Tester -> วนแก้ถ้า fail -> สรุปจบ)`
-    );
-  }
   const header = `ClickUp task ของ feature นี้คือ: ${clickupRef}\n`;
-  if (phase === "initial") {
+
+  if (phase === "fullRunNoGate") {
     return (
       header +
-      `PHASE: initial\n` +
-      `ทำตามบทบาท PM ของคุณเฉพาะขั้นตอน 0-1 เท่านั้น ` +
-      `(ดึง spec จาก ClickUp เขียน spec.md -> วางแผน -> เขียน plan.md) ` +
-      `แล้วหยุดทันที รอ PO อนุมัติ ห้ามสั่ง Dev ในรอบนี้เด็ดขาด`
+      `PHASE: full-run-no-gate\n` +
+      `ทำตามบทบาท PM ของคุณให้ครบทุกขั้นตอน ` +
+      `(ดึง spec จาก ClickUp เขียน spec.md -> วางแผน -> เขียน plan.md -> สั่ง Dev -> สั่ง Reviewer -> สั่ง Tester -> วนแก้ถ้า fail -> สรุปจบ)`
     );
   }
-  // fullRunNoGate
+
+  // Every gated phase after the first resumes work already on disk, so it
+  // starts the same way: read what's there, pick up any answer the PO typed
+  // at the gate, then do exactly one stage.
+  const resumeContext =
+    phase === "initial"
+      ? ""
+      : `spec.md (${vars.SPEC_PATH}) และ plan.md (${vars.PLAN_PATH}) มีอยู่แล้วจากรอบก่อนหน้า ` +
+        `และ PO อนุมัติให้ทำขั้นตอนนี้ต่อแล้ว **ข้ามขั้นตอน 0 และ 1 ไปเลย** อย่าไปเขียน spec.md หรือ plan.md ใหม่ซ้ำ ` +
+        `ก่อนอื่น ใช้ Read tool เช็คไฟล์ ${vars.ANSWERS_PATH} — ถ้ามีอยู่และไม่ว่าง นั่นคือคำตอบที่ PO พิมพ์ตอบคำถามของคุณ ` +
+        `ที่ gate ล่าสุด ให้เพิ่ม section "## คำตอบจาก PO" ต่อท้าย plan.md แล้วนำคำตอบไปใช้ในคำสั่งที่จะส่งต่อในรอบนี้ ` +
+        `(ถ้าไม่มีไฟล์นี้หรือว่าง แปลว่า PO อนุมัติโดยไม่ได้ตอบอะไรเพิ่ม ให้ทำต่อตาม plan.md เดิม) `;
+
   return (
     header +
-    `PHASE: full-run-no-gate\n` +
-    `ทำตามบทบาท PM ของคุณให้ครบทุกขั้นตอน ` +
-    `(ดึง spec จาก ClickUp เขียน spec.md -> วางแผน -> เขียน plan.md -> สั่ง Dev -> สั่ง Reviewer -> สั่ง Tester -> วนแก้ถ้า fail -> สรุปจบ)`
+    `PHASE: ${PHASE_WIRE_NAME[phase]}\n` +
+    resumeContext +
+    PHASE_INSTRUCTION[phase] +
+    `\nคำตอบสุดท้ายของคุณในรอบนี้คือสรุปสั้นๆ ให้ PO อ่านเร็วว่าขั้นตอนนี้ได้อะไร และถ้ามีอะไรที่ต้องให้ PO ตัดสินใจ ให้ถามมาในนั้นเลย`
   );
 }
 
@@ -167,6 +233,7 @@ export function buildPmSessionPlan(
   // so whatever mode the PO chose for PM (see src/cli.ts's --permission-mode
   // default) governs the sub-agents too, rather than silently overriding it.
   vars.SUB_AGENT_PERMISSION_MODE = permissionMode;
+  renderSubAgentRoles(featureDir(repoRoot, meta.feature), vars);
   const pmRoleTemplate = fs.readFileSync(path.join(ROLES_DIR, "pm.md"), "utf8");
   const pmSystemPrompt = fillTemplate(pmRoleTemplate, vars);
 

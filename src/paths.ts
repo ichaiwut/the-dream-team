@@ -19,6 +19,12 @@ export const FILES = {
   meta: "meta.json",
   spec: "spec.md",
   plan: "plan.md",
+  // Dev's own structured hand-off: what it changed, what it assumed, what
+  // it couldn't decide. Dev used to report this only as the last message of
+  // its session — buried inside the tee'd JSON envelope, readable by nobody
+  // and openable as nothing. Reviewer and Tester each had a file; Dev, the
+  // one whose work the whole rest of the chain is about, didn't.
+  devSummary: "dev-summary.md",
   review: "review.md",
   report: "report.md",
   log: "log.ndjson",
@@ -31,7 +37,15 @@ export const FILES = {
   devSession: "dev-session.log",
   reviewerSession: "reviewer-session.log",
   testerSession: "tester-session.log",
+  // One readable artifact per gate, plus the end-of-run report. Written
+  // next to their markdown sources and opened in the PO's browser at the
+  // moment the stage finishes, so "what did Dev actually do" has an answer
+  // that isn't "scroll back through a terminal pane".
   planHtml: "plan.html",
+  devHtml: "dev.html",
+  reviewHtml: "review.html",
+  testHtml: "test.html",
+  finalHtml: "report.html",
 };
 
 export function featureFile(repoRoot: string, feature: string, file: keyof typeof FILES): string {
