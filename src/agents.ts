@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { Meta } from "./worktree.js";
 import { FILES, featureDir, featureFile } from "./paths.js";
 import { CLICKUP_WRITE_TOOLS } from "./clickupTools.js";
+import { ensureClaudeBashAllowRule } from "./claudeSettings.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROLES_DIR = path.join(__dirname, "..", "roles");
@@ -107,6 +108,12 @@ export function buildPmSessionPlan(
   const pmRoleTemplate = fs.readFileSync(path.join(ROLES_DIR, "pm.md"), "utf8");
   const pmSystemPrompt = fillTemplate(pmRoleTemplate, vars);
 
+  // Best-effort: without this, PM's nested `claude -p ...` calls to spawn
+  // Dev/Reviewer/Tester can hang on an interactive Bash-approval prompt that
+  // has no human attached to answer it (PM runs headless, via -p). See
+  // src/claudeSettings.ts for why this is a guess, not a verified fix.
+  ensureClaudeBashAllowRule(meta.worktreePath);
+
   const initialPrompt =
     `ClickUp task ของ feature นี้คือ: ${clickupRef}\n` +
     `ทำตามบทบาท PM ของคุณให้ครบทุกขั้นตอน ` +
@@ -130,7 +137,12 @@ export function buildPmSessionPlan(
     `[pmctl] หมายเหตุ: ถ้า claude CLI เครื่องนี้ไม่รู้จัก --append-system-prompt/--permission-mode/--disallowedTools ` +
     `ให้รัน "claude --help" เช็คชื่อ flag ปัจจุบันแล้วแก้ใน src/agents.ts\n` +
     `[pmctl] PM จะใช้ ClickUp connector ของบัญชีนี้เอง — tool เขียนของ ClickUp ถูกบล็อกผ่าน --disallowedTools ` +
-    `(ดู src/clickupTools.ts ว่าบล็อกครบไหมก่อนใช้งานจริง)\n`;
+    `(ดู src/clickupTools.ts ว่าบล็อกครบไหมก่อนใช้งานจริง)\n` +
+    `[pmctl] เพิ่ม allow rule "Bash(claude *)" ให้ ${meta.worktreePath}/.claude/settings.local.json แล้ว (ถ้ายังไม่มี) ` +
+    `เพื่อให้ PM สั่ง Dev/Reviewer/Tester ผ่าน bash ได้โดยไม่ติด approval prompt ที่ไม่มีใครตอบ — ` +
+    `syntax นี้เดายังไม่ได้ verify กับ claude CLI จริง ถ้ายังเจอ "this command requires approval" ` +
+    `ให้รัน claude แบบ interactive ในโฟลเดอร์นี้สักครั้ง กด allow ให้คำสั่ง claude -p แล้วเลือก "always allow" ` +
+    `ตัว CLI จะเขียน syntax ที่ถูกต้องลงไฟล์เดียวกันนี้เอง\n`;
 
   return { args, cwd: meta.worktreePath, logFile, notice };
 }

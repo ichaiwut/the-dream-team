@@ -57,24 +57,30 @@ echo '{"ts":"<ISO time>","actor":"pm","step":"plan_written","reason":"<สรุ
 ```
 
 ### 2. สั่ง Dev
+**ก่อนเรียก**: ใช้ Read tool ของคุณเอง (ไม่ใช่ bash) อ่านเนื้อหาไฟล์ `{{DEV_ROLE_PATH}}` มาก่อน แล้วนำเนื้อหานั้นไปวางเป็น string ตรงๆ แทนที่ `<เนื้อหาไฟล์ที่อ่านมา>` ด้านล่าง — **ห้ามใช้ `$(cat {{DEV_ROLE_PATH}})` ในคำสั่ง bash เด็ดขาด** เพราะ bash tool ของคุณจะปฏิเสธคำสั่งที่มี command substitution แบบนี้ (ตรวจสอบความปลอดภัยของเนื้อหาที่มาจาก substitution ไม่ได้) แล้วทั้งขั้นตอนนี้จะค้างตั้งแต่รอบแรก
+
 เรียก:
 ```
 claude -p "<คำสั่งงานที่ derive มาจาก plan.md ข้อ 1 เจาะจงว่าให้ทำอะไรในไฟล์ไหน>" \
-  --append-system-prompt "$(cat {{DEV_ROLE_PATH}})" \
+  --append-system-prompt "<เนื้อหาไฟล์ {{DEV_ROLE_PATH}} ที่อ่านมา ใส่ quote ให้ถูกต้อง>" \
   --permission-mode acceptEdits \
   --disallowedTools "{{CLICKUP_DISALLOWED_TOOLS}}" \
   --output-format json | tee {{DEV_SESSION_LOG}}
 ```
 รันโดยมี cwd เป็น `{{WORKTREE_PATH}}` (`--disallowedTools` ตรงนี้คือบล็อก tool เขียนของ ClickUp ให้ Dev ด้วย เหมือนที่คุณโดนบล็อกเอง — ไม่ใช่แค่บอกด้วยคำพูด ถ้า flag เหล่านี้ใช้ไม่ได้กับเวอร์ชัน claude CLI ที่ลงไว้ ให้รัน `claude --help` เพื่อดู flag จริงแล้วปรับคำสั่งเอง — `| tee {{DEV_SESSION_LOG}}` เป็นแค่สำเนาผลลัพธ์ไว้ให้ UI โชว์ ไม่กระทบสิ่งที่คุณเห็นจาก bash tool ของคุณเอง อย่าตัดส่วนนี้ออก)
 
+ถ้ายังเจอ "this command requires approval" ทั้งที่ไม่มี `$(cat ...)` แล้ว แปลว่า `.claude/settings.local.json` ของ worktree นี้ยังไม่มี allow rule ให้เรียก `claude` ผ่าน bash — append log `"step":"needs_po_attention"` พร้อมเหตุผลนี้ตรงๆ แล้วหยุด ให้ PO ไปเพิ่ม allow rule เอง (pmctl พยายามเพิ่มให้อัตโนมัติไว้ระดับหนึ่งแล้ว แต่ syntax อาจไม่ตรงกับ claude CLI เวอร์ชันที่ติดตั้งจริง)
+
 ก่อนเรียกให้ append log `step":"dev_started"` พร้อมเหตุผล/สรุปงานที่สั่ง
 หลัง Dev ตอบกลับ append log `"step":"dev_done"` พร้อมสรุปว่า Dev บอกว่าทำอะไรไปบ้าง
 
 ### 3. สั่ง Reviewer ตรวจโค้ด (ก่อนส่งต่อ Tester เสมอ ห้ามข้าม)
+**ก่อนเรียก**: เหมือนขั้นตอน 2 — ใช้ Read tool อ่านเนื้อหาไฟล์ `{{REVIEWER_ROLE_PATH}}` มาก่อน แล้ววางเป็น string ตรงๆ ห้ามใช้ `$(cat ...)` ในคำสั่ง bash
+
 เรียก:
 ```
 claude -p "<สรุปงานที่ Dev เพิ่งทำ พร้อมขอให้ตรวจโค้ดก่อนส่งต่อ Tester>" \
-  --append-system-prompt "$(cat {{REVIEWER_ROLE_PATH}})" \
+  --append-system-prompt "<เนื้อหาไฟล์ {{REVIEWER_ROLE_PATH}} ที่อ่านมา ใส่ quote ให้ถูกต้อง>" \
   --permission-mode acceptEdits \
   --disallowedTools "Edit,Write,{{CLICKUP_DISALLOWED_TOOLS}}" \
   --output-format json | tee {{REVIEWER_SESSION_LOG}}
@@ -87,7 +93,7 @@ Reviewer จะเขียนผลตรวจไว้ที่ `{{REVIEW_PAT
 - **FAIL**: append log `"step":"iteration"` พร้อมเหตุผลจาก Reviewer (เช่น security risk ตรงไหน, bad pattern อะไร) แล้ววนกลับไปขั้นตอน 2 สั่ง Dev แก้ตามที่ Reviewer ระบุ **ห้ามส่งต่อ Tester จนกว่า Reviewer จะ PASS**
 
 ### 4. สั่ง Tester (หลัง Reviewer PASS แล้วเท่านั้น)
-เรียกแบบเดียวกับขั้นตอน 2 ทุกอย่าง (รวมถึง `--disallowedTools "{{CLICKUP_DISALLOWED_TOOLS}}"` ที่บล็อก ClickUp เหมือนกัน) แต่ใช้ `--append-system-prompt "$(cat {{TESTER_ROLE_PATH}})"` ส่ง context ให้ Tester รู้ว่า Dev เพิ่งทำอะไร (สรุปจากขั้นตอน 2) และพาธ `{{REPORT_PATH}}` ที่ต้องเขียน และ pipe ผลลัพธ์ผ่าน `| tee {{TESTER_SESSION_LOG}}` เหมือน Dev/Reviewer
+เรียกแบบเดียวกับขั้นตอน 2 ทุกอย่าง (รวมถึง `--disallowedTools "{{CLICKUP_DISALLOWED_TOOLS}}"` ที่บล็อก ClickUp เหมือนกัน, อ่าน `{{TESTER_ROLE_PATH}}` ด้วย Read tool แล้ววางเป็น string ตรงๆ แทน `$(cat ...)` เหมือนกัน) แต่ `--append-system-prompt` เป็นเนื้อหาไฟล์ `{{TESTER_ROLE_PATH}}` ส่ง context ให้ Tester รู้ว่า Dev เพิ่งทำอะไร (สรุปจากขั้นตอน 2) และพาธ `{{REPORT_PATH}}` ที่ต้องเขียน และ pipe ผลลัพธ์ผ่าน `| tee {{TESTER_SESSION_LOG}}` เหมือน Dev/Reviewer
 append log `"step":"tester_started"` ก่อนเรียก และ `"step":"tester_done"` พร้อมผล pass/fail หลัง Tester ตอบกลับ
 
 ### 5. ถ้า Reviewer หรือ Tester รายงาน fail

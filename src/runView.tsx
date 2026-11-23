@@ -147,6 +147,47 @@ function splitLines(text: string): string[] {
   return text.split(/\r?\n/);
 }
 
+// Border (1 col each side) + paddingX={1} (1 col each side) eaten by every panel.
+const PANEL_INNER_PADDING = 4;
+
+/**
+ * Soft-wraps a single raw line to `width` columns, breaking on spaces where
+ * possible and hard-breaking any single run longer than `width` (Thai text
+ * has no spaces to break on, so long Thai runs — and URLs — always hit this
+ * path). Without this, Ink's own `wrap="truncate-end"` just chops a line
+ * dead at the panel edge, so most of every long line (easily most of a
+ * markdown paragraph) never gets seen at all.
+ */
+function wrapLine(line: string, width: number): string[] {
+  if (width <= 0 || line.length <= width) return [line];
+  const words = line.split(" ");
+  const out: string[] = [];
+  let cur = "";
+  for (let word of words) {
+    while (word.length > width) {
+      if (cur.length > 0) {
+        out.push(cur);
+        cur = "";
+      }
+      out.push(word.slice(0, width));
+      word = word.slice(width);
+    }
+    const candidate = cur.length === 0 ? word : `${cur} ${word}`;
+    if (candidate.length > width) {
+      out.push(cur);
+      cur = word;
+    } else {
+      cur = candidate;
+    }
+  }
+  out.push(cur);
+  return out;
+}
+
+function wrapLines(lines: string[], width: number): string[] {
+  return lines.flatMap((l) => wrapLine(l, width));
+}
+
 /** Tracks the real terminal size and re-renders on resize, so the UI always fills the screen. */
 function useTerminalSize() {
   const [size, setSize] = useState({
@@ -294,11 +335,14 @@ function App({
           <Text bold dimColor>
             TODO (PM → Dev → Tester)
           </Text>
-          {checklist.items.map((item) => (
-            <Text key={item.id} color={checklistColor(item.status)} bold={item.status === "current"}>
-              {checklistMark(item.status)} {item.label}
-            </Text>
-          ))}
+          {checklist.items.map((item) => {
+            const stuck = item.status === "current" && checklist.needsAttention;
+            return (
+              <Text key={item.id} color={stuck ? "red" : checklistColor(item.status)} bold={item.status === "current"}>
+                {stuck ? "⚠" : checklistMark(item.status)} {item.label}
+              </Text>
+            );
+          })}
           {checklist.iterationCount > 0 && (
             <Text color="yellow">↻ วนแก้แล้ว {checklist.iterationCount} รอบ</Text>
           )}
@@ -321,11 +365,13 @@ function App({
             PM SESSION (live)
           </Text>
           {lines.length === 0 && !done && <Text dimColor>(กำลังเริ่ม...)</Text>}
-          {lines.slice(-visibleRows).map((l, i) => (
-            <Text key={i} wrap="truncate-end">
-              {l}
-            </Text>
-          ))}
+          {wrapLines(lines, pmWidth - PANEL_INNER_PADDING)
+            .slice(-visibleRows)
+            .map((l, i) => (
+              <Text key={i} wrap="truncate-end">
+                {l}
+              </Text>
+            ))}
           {done && (
             <Text bold color={done.code === 0 ? "green" : "red"}>
               -- จบแล้ว (exit code {done.code}) --
@@ -347,11 +393,13 @@ function App({
             </Text>
             {!subAgent && <Text dimColor>(PM ยังไม่ได้สั่ง Dev/Reviewer/Tester)</Text>}
             {subAgent && subLines.length === 0 && <Text dimColor>(รอผลลัพธ์...)</Text>}
-            {subLines.slice(-visibleRows).map((l, i) => (
-              <Text key={i} wrap="truncate-end">
-                {l}
-              </Text>
-            ))}
+            {wrapLines(subLines, subWidth - PANEL_INNER_PADDING)
+              .slice(-visibleRows)
+              .map((l, i) => (
+                <Text key={i} wrap="truncate-end">
+                  {l}
+                </Text>
+              ))}
           </Box>
         )}
       </Box>
