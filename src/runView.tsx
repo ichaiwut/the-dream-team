@@ -8,11 +8,36 @@ import { buildPmSessionPlan, spawnClaudeProcess } from "./agents.js";
 import { stepColor, actorBadge } from "./tui.js";
 
 const LOG_POLL_MS = 1000;
-const MAX_LINES = 1000;
-const VISIBLE_LINES = 28;
+const MAX_LINES = 2000;
+
+// Rows the chrome around the two panels takes up: title line + its blank
+// margin line + each panel's own header line + its top/bottom border.
+const HEADER_ROWS = 2;
+const PANEL_CHROME_ROWS = 3;
+const STATUS_WIDTH_RATIO = 0.3;
+const MIN_STATUS_WIDTH = 28;
 
 function splitLines(text: string): string[] {
   return text.split(/\r?\n/);
+}
+
+/** Tracks the real terminal size and re-renders on resize, so the UI always fills the screen. */
+function useTerminalSize() {
+  const [size, setSize] = useState({
+    columns: process.stdout.columns || 100,
+    rows: process.stdout.rows || 30,
+  });
+
+  useEffect(() => {
+    const onResize = () =>
+      setSize({ columns: process.stdout.columns || 100, rows: process.stdout.rows || 30 });
+    process.stdout.on("resize", onResize);
+    return () => {
+      process.stdout.off("resize", onResize);
+    };
+  }, []);
+
+  return size;
 }
 
 function App({
@@ -29,6 +54,7 @@ function App({
   onDone: (code: number) => void;
 }) {
   const { exit } = useApp();
+  const { columns, rows } = useTerminalSize();
   const [lines, setLines] = useState<string[]>([]);
   const [log, setLog] = useState<LogEntry[]>(() => readLog(repoRoot, meta.feature));
   const [done, setDone] = useState<{ code: number } | null>(null);
@@ -93,8 +119,16 @@ function App({
     }
   });
 
+  // Fill the real terminal: compute panel widths/heights from the current
+  // columns/rows instead of hardcoding them, and recompute whenever the
+  // terminal is resized (useTerminalSize above).
+  const statusWidth = Math.max(MIN_STATUS_WIDTH, Math.floor(columns * STATUS_WIDTH_RATIO));
+  const pmWidth = Math.max(40, columns - statusWidth - 3); // 3 = gap + borders between panels
+  const panelHeight = Math.max(5, rows - HEADER_ROWS);
+  const visibleRows = Math.max(1, panelHeight - PANEL_CHROME_ROWS - (done ? 1 : 0));
+
   return (
-    <Box flexDirection="column" width={110}>
+    <Box flexDirection="column" width={columns} height={rows}>
       <Box>
         <Text bold>pmctl run — {meta.feature}</Text>
         <Text dimColor>
@@ -102,13 +136,13 @@ function App({
           (branch={meta.branch}) — Ctrl+C ยกเลิก{done ? ", q/Enter ออก" : ""}
         </Text>
       </Box>
-      <Box marginTop={1}>
-        <Box flexDirection="column" width={74} borderStyle="single" paddingX={1}>
+      <Box marginTop={1} height={panelHeight}>
+        <Box flexDirection="column" width={pmWidth} height={panelHeight} borderStyle="single" paddingX={1}>
           <Text bold dimColor>
-            PM SESSION (live)
+            PM SESSION (live) — agent ที่กำลังทำงานตอนนี้ดูได้ที่ STATUS ด้านขวา
           </Text>
           {lines.length === 0 && !done && <Text dimColor>(กำลังเริ่ม...)</Text>}
-          {lines.slice(-VISIBLE_LINES).map((l, i) => (
+          {lines.slice(-visibleRows).map((l, i) => (
             <Text key={i} wrap="truncate-end">
               {l}
             </Text>
@@ -120,12 +154,19 @@ function App({
           )}
         </Box>
 
-        <Box flexDirection="column" width={34} borderStyle="single" paddingX={1} marginLeft={1}>
+        <Box
+          flexDirection="column"
+          width={statusWidth}
+          height={panelHeight}
+          borderStyle="single"
+          paddingX={1}
+          marginLeft={1}
+        >
           <Text bold dimColor>
-            STATUS
+            STATUS (PM/Dev/Tester)
           </Text>
           {log.length === 0 && <Text dimColor>(ยังไม่มี log)</Text>}
-          {log.slice(-15).map((entry, i) => (
+          {log.slice(-Math.max(1, panelHeight - PANEL_CHROME_ROWS)).map((entry, i) => (
             <Text key={i} wrap="truncate-end">
               <Text color={stepColor(entry.step)}>
                 [{actorBadge(entry.actor)}] {entry.step}
@@ -141,9 +182,10 @@ function App({
 /**
  * Interactive, single-screen alternative to running `pmctl run` and
  * `pmctl watch` in two separate terminals: renders the PM session's live
- * output next to this feature's step log, in one Ink UI. Falls back to
- * spawnPmSession (plain stdout streaming) when stdin/stdout aren't a real
- * TTY — see src/cli.ts.
+ * output next to this feature's step log, in one Ink UI that fills the
+ * real terminal and follows it on resize. Falls back to spawnPmSession
+ * (plain stdout streaming) when stdin/stdout aren't a real TTY — see
+ * src/cli.ts.
  */
 export function runPmSessionWithTui(
   repoRoot: string,
