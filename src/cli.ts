@@ -1,12 +1,10 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import fs from "node:fs";
-import path from "node:path";
 import { createWorktree, loadMeta, removeWorktree } from "./worktree.js";
-import { fetchClickUpTask, taskToSpecMarkdown } from "./clickup.js";
 import { appendLog, formatLog, readLog } from "./log.js";
-import { featureDir, featureFile, stateRoot } from "./paths.js";
-import { spawnPmSession } from "./agents.js";
+import { featureFile, stateRoot } from "./paths.js";
+import { spawnPmSession, spawnRefreshSpec } from "./agents.js";
 import { watchFeatures } from "./watch.js";
 import { runTui } from "./tui.js";
 
@@ -21,15 +19,12 @@ program
 
 program
   .command("run <feature>")
-  .description("สร้าง worktree ใหม่ ดึง spec จาก ClickUp แล้วเริ่ม PM session")
-  .requiredOption("--clickup <taskId>", "ClickUp task id ที่เป็น spec ของ feature นี้")
+  .description("สร้าง worktree ใหม่ แล้วเริ่ม PM session (PM จะดึง spec จาก ClickUp เองผ่าน connector ของคุณ)")
+  .requiredOption("--clickup <ref>", "ClickUp task id หรือวาง URL เต็มก็ได้ (เช่น https://app.clickup.com/t/9018044177/DSAG-218)")
   .option("--permission-mode <mode>", "permission mode ที่ส่งให้ PM session", "acceptEdits")
   .action(async (feature: string, opts: { clickup: string; permissionMode: string }) => {
-    console.log(`[pmctl] สร้าง worktree + ดึง spec สำหรับ feature "${feature}"...`);
+    console.log(`[pmctl] สร้าง worktree สำหรับ feature "${feature}"...`);
     const meta = createWorktree(repoRoot, feature, opts.clickup);
-
-    const task = await fetchClickUpTask(opts.clickup);
-    fs.writeFileSync(featureFile(repoRoot, feature, "spec"), taskToSpecMarkdown(task));
 
     appendLog(repoRoot, feature, {
       actor: "system",
@@ -38,22 +33,21 @@ program
       result: `worktree=${meta.worktreePath} port=${meta.port}`,
     });
 
-    console.log(`[pmctl] spec พร้อมแล้วที่ ${featureFile(repoRoot, feature, "spec")}`);
-    await spawnPmSession(repoRoot, meta, opts.permissionMode);
+    await spawnPmSession(repoRoot, meta, opts.permissionMode, opts.clickup);
   });
 
 program
   .command("refresh-spec <feature>")
-  .description("ดึง ClickUp task ใหม่อีกรอบ เผื่อ PO แก้ไข task ไปแล้วหลังเริ่มงาน")
-  .requiredOption("--clickup <taskId>")
+  .description("สั่งให้ PM ดึง ClickUp task ใหม่อีกรอบทับ spec.md เผื่อ PO แก้ไข task ไปแล้วหลังเริ่มงาน")
+  .requiredOption("--clickup <ref>")
   .action(async (feature: string, opts: { clickup: string }) => {
-    const task = await fetchClickUpTask(opts.clickup);
-    fs.writeFileSync(featureFile(repoRoot, feature, "spec"), taskToSpecMarkdown(task));
+    const meta = loadMeta(repoRoot, feature);
     appendLog(repoRoot, feature, {
       actor: "system",
-      step: "spec_refreshed",
+      step: "spec_refresh_requested",
       reason: "PO ขอดึง ClickUp task ใหม่ระหว่างทำงาน",
     });
+    await spawnRefreshSpec(repoRoot, meta, opts.clickup);
     console.log(`[pmctl] อัปเดต spec.md แล้ว`);
   });
 

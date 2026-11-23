@@ -15,7 +15,7 @@ Giving one agent full autonomy over a feature — writing the code, testing it, 
 
 | Rule | How it's enforced |
 |---|---|
-| ClickUp is write-only for the PO; PM only reads it | `CLICKUP_API_TOKEN` is read once by the `pmctl` parent process and deliberately never forwarded into the environment of any spawned `claude` subprocess — PM, Dev, and Tester have no credential to write back even if instructed to |
+| ClickUp is write-only for the PO; PM only reads it | PM uses your own already-authenticated ClickUp MCP connector to read a task, but is spawned with `--disallowedTools` naming every write-capable ClickUp tool (`src/clickupTools.ts`) — Claude Code's own permission system refuses the call if PM tries one. This is a blocklist, not a withheld credential; see "Known limitations" |
 | The working log is never stored in ClickUp | Every milestone is appended to a local, append-only `.pmctl/<feature>/log.ndjson` — plain files the PO can read any time without waiting on a summary |
 | PM must plan before dispatching Dev | `roles/pm.md` requires `plan.md` (goal, approach, flow, affected files) to exist before Dev is invoked, for every feature regardless of size |
 | Tester must prove it, not assert it | `roles/tester.md` forbids a pass verdict based on reading code; it must run the unit suite, then execute real e2e scenarios against a running instance, and cite command output as evidence in `report.md` |
@@ -25,8 +25,8 @@ Giving one agent full autonomy over a feature — writing the code, testing it, 
 
 - Node.js >= 18
 - [Claude Code](https://claude.com/claude-code) (`claude` CLI) installed and authenticated
+- A ClickUp MCP connector already configured for your Claude Code account (the same one you use day to day) — PM reads through it, no separate API token needed
 - A git repository to run features against (this repo, `pmctl` itself, is just where the tool's source lives — you run it *inside* the project you're building)
-- A ClickUp API token with read access to the tasks you'll use as specs
 
 ## Install
 
@@ -40,7 +40,7 @@ npm link        # exposes `pmctl` globally; or invoke node dist/cli.js directly 
 
 ## Before first real use
 
-The `claude` CLI flags this tool shells out to (`--append-system-prompt`, `--permission-mode`, `--output-format`) were written against a general understanding of Claude Code's interface at the time this was built. Flag names can change between versions. Before running this against real work:
+The `claude` CLI flags this tool shells out to (`--append-system-prompt`, `--permission-mode`, `--disallowedTools`) were written against a general understanding of Claude Code's interface at the time this was built. Flag names can change between versions. Before running this against real work:
 
 ```bash
 claude --help
@@ -50,20 +50,21 @@ and compare against what's used in `src/agents.ts` and `roles/pm.md`. If somethi
 
 `--permission-mode acceptEdits` is the default, so file edits are accepted without an interactive prompt (this runs unattended). Pass `--permission-mode <mode>` to `pmctl run` to tighten or loosen that for a given feature.
 
+Also double-check `src/clickupTools.ts` against your connector's actual current tool list before trusting the write-block. It's a blocklist built from the tool set visible when this was written — if your ClickUp MCP server has since added a write-capable tool not in that list, PM would not be blocked from using it.
+
 ## Usage
 
 ```bash
-export CLICKUP_API_TOKEN=pk_xxxxx     # the PO's own token — never shared with PM
-
 cd your-backend-repo
-pmctl run add-dark-mode --clickup 86abc123de
+pmctl run add-dark-mode --clickup "https://app.clickup.com/t/9018044177/DSAG-218"
 ```
+
+`--clickup` takes either a full ClickUp task URL (custom IDs like `DSAG-218` included — just paste the URL as it appears in your browser) or a bare task id.
 
 This will:
 
 1. Create a new git worktree (`../your-backend-repo-add-dark-mode`) on branch `feature/add-dark-mode`, with an auto-assigned dev server port
-2. Pull the ClickUp task into `.pmctl/add-dark-mode/spec.md` as a one-time snapshot
-3. Start a PM session (a `claude` subprocess with its own bash access) that follows `roles/pm.md`: plan → write `plan.md` → dispatch Dev → dispatch Tester (real e2e) → loop on failure → final summary
+2. Start a PM session (a `claude` subprocess with its own bash access, using your existing ClickUp connector) that follows `roles/pm.md`: fetch the ClickUp task itself and write `spec.md` → plan → write `plan.md` → dispatch Dev → dispatch Tester (real e2e) → loop on failure → final summary
 
 You can inspect progress at any point without interrupting PM:
 
@@ -82,8 +83,10 @@ When stdin/stdout aren't a TTY (piped output, CI, this tool running inside anoth
 If the ClickUp task changes after the feature has started:
 
 ```bash
-pmctl refresh-spec add-dark-mode --clickup 86abc123de
+pmctl refresh-spec add-dark-mode --clickup "https://app.clickup.com/t/9018044177/DSAG-218"
 ```
+
+(this spawns a short one-off `claude` call that re-fetches via the connector and overwrites `spec.md`, same write-blocklist applied)
 
 Once merged, clean up the worktree:
 
@@ -105,6 +108,6 @@ pmctl clean add-dark-mode    # removes the worktree; .pmctl/<feature>/ (log, pla
 
 ## Known limitations
 
-- "Read-only ClickUp access" is enforced at the code level (no token forwarded to subprocesses), not by a ClickUp API scope. Anyone running the same token outside this tool has full write access as normal.
-- Not yet validated end-to-end against a live `claude` CLI — the environment this was built in doesn't have Claude Code installed. The worktree/port/ClickUp/log mechanics are tested and working; the PM→Dev→Tester loop has only been verified at the level of "does it assemble the right command," not a real run. Expect to adjust flags or prompt wording on first use.
-- No sandboxing beyond what `--permission-mode` gives you. `acceptEdits` auto-accepts file changes from Dev with no human in the loop — for anything touching production data or paying customers, use a stricter permission mode or review the diff before merging regardless of what Tester reports.
+- **"Read-only ClickUp access" is a blocklist, not a structural guarantee.** `src/clickupTools.ts` names every write-capable ClickUp MCP tool visible when this was written, passed to `--disallowedTools`. If the ClickUp connector adds a new write tool later and this list isn't updated, PM would not be blocked from using it. Re-check it periodically. (An earlier version of this tool used a manually-exported `CLICKUP_API_TOKEN` that was never forwarded to subprocesses — a stronger, credential-level guarantee, at the cost of one extra setup step and not reusing your existing connector. Revert to that approach in `src/agents.ts`/`roles/pm.md` if the blocklist's weaker guarantee isn't acceptable for your use case.)
+- Not yet validated end-to-end against a live `claude` CLI — the environment this was built in doesn't have Claude Code installed, so `--disallowedTools` blocking the right tool names has not been confirmed against a real ClickUp connector either. The worktree/port/log mechanics are tested and working; the PM→Dev→Tester loop and the tool-blocking has only been verified at the level of "does it assemble the right command," not a real run. Expect to adjust flags, tool names, or prompt wording on first use.
+- No sandboxing beyond what `--permission-mode` and `--disallowedTools` give you. `acceptEdits` auto-accepts file changes from Dev with no human in the loop — for anything touching production data or paying customers, use a stricter permission mode or review the diff before merging regardless of what Tester reports.
