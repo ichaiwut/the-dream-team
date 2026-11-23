@@ -7,6 +7,11 @@ import { Meta } from "./worktree.js";
 import { readLog, LogEntry } from "./log.js";
 import { featureFile } from "./paths.js";
 import { buildPmSessionPlan, spawnClaudeProcess, PmPhase } from "./agents.js";
+// PIPELINE/checklist logic lives in pipeline.ts so plan.html's flow chart
+// (planHtml.ts) computes the exact same checklist the TUI shows here,
+// instead of drifting out of sync with a second copy of this logic.
+import { computeChecklist, checklistColor, checklistMark } from "./pipeline.js";
+import { buildPlanHtml, openInBrowser } from "./planHtml.js";
 
 const LOG_POLL_MS = 1000;
 const MAX_LINES = 2000;
@@ -98,95 +103,6 @@ function readPlanPreview(repoRoot: string, feature: string): string {
   } catch {
     return "(อ่าน plan.md ไม่สำเร็จ)";
   }
-}
-
-// The canonical PO->PM->Dev->Tester pipeline, in order, as roles/pm.md
-// instructs PM to log it (log.ts' step field). Used to render a todo-style
-// checklist instead of a raw dump of log lines.
-const PIPELINE: { id: string; label: string }[] = [
-  { id: "spec_fetched", label: "ดึง spec จาก ClickUp" },
-  { id: "plan_written", label: "วางแผน (plan.md)" },
-  { id: "plan_awaiting_approval", label: "รอ PO อนุมัติ plan" },
-  { id: "dev_started", label: "สั่ง Dev" },
-  { id: "dev_done", label: "Dev ทำงานเสร็จ" },
-  { id: "reviewer_started", label: "สั่ง Reviewer ตรวจโค้ด" },
-  { id: "reviewer_done", label: "Reviewer ผ่านแล้ว" },
-  { id: "tester_started", label: "สั่ง Tester (e2e)" },
-  { id: "tester_done", label: "Tester ตรวจสอบเสร็จ" },
-  { id: "final_done", label: "จบงาน" },
-];
-
-interface ChecklistItem {
-  id: string;
-  label: string;
-  status: "done" | "current" | "pending";
-}
-
-interface Checklist {
-  items: ChecklistItem[];
-  iterationCount: number;
-  needsAttention: boolean;
-}
-
-/**
- * Turns the append-only log into a todo-style checklist against the fixed
- * pipeline above. Since Dev/Tester can be looped back into on a test
- * failure ("iteration" in roles/pm.md's step 4), the pointer rolls back to
- * just after the plan was approved on every iteration, so mid-loop the
- * checklist correctly shows Dev/Tester as pending again rather than staying
- * "done" from an earlier failed round.
- */
-function computeChecklist(log: LogEntry[]): Checklist {
-  let pointer = -1;
-  let iterationCount = 0;
-  let needsAttention = false;
-
-  for (const entry of log) {
-    if (entry.step === "iteration") {
-      iterationCount++;
-      pointer = Math.min(pointer, 2); // back to right after plan_awaiting_approval
-      continue;
-    }
-    if (entry.step === "needs_po_attention") {
-      needsAttention = true;
-      continue;
-    }
-    const idx = PIPELINE.findIndex((p) => p.id === entry.step);
-    if (idx !== -1 && idx > pointer) pointer = idx;
-  }
-
-  // Before PM has appended its very first log line, pointer stays -1 — but
-  // PM is already alive and working toward step 0 (fetching the ClickUp
-  // spec), possibly for a while (a slow ClickUp call, or just a lot of
-  // reasoning). Without this, every item shows pending with no "current"
-  // marker at all, which reads as "nothing is happening" even while PM's
-  // own panel is visibly streaming output. Treating -1 like 0 here (for the
-  // *current* marker only — not for "done") fixes that without claiming
-  // step 0 is finished before it's logged as such.
-  const currentPointer = Math.max(pointer, 0);
-  const items: ChecklistItem[] = PIPELINE.map((p, i) => ({
-    ...p,
-    status:
-      i < pointer
-        ? "done"
-        : i === currentPointer
-          ? (i === PIPELINE.length - 1 ? "done" : "current")
-          : "pending",
-  }));
-
-  return { items, iterationCount, needsAttention };
-}
-
-function checklistColor(status: ChecklistItem["status"]): string | undefined {
-  if (status === "done") return "green";
-  if (status === "current") return "yellow";
-  return undefined;
-}
-
-function checklistMark(status: ChecklistItem["status"]): string {
-  if (status === "done") return "☑";
-  if (status === "current") return "▶";
-  return "☐";
 }
 
 function splitLines(text: string): string[] {
@@ -302,6 +218,7 @@ function App({
   // Starts at the top of the plan (not the tail) every time a fresh plan is
   // shown, since the top is where the summary/overview lives.
   const [planScroll, setPlanScroll] = useState(0);
+  const [planHtmlPath, setPlanHtmlPath] = useState("");
   const childRef = useRef<ChildProcessByStdio<null, Readable, Readable> | null>(null);
   const tailRef = useRef(""); // carries a partial last line between chunks
 
@@ -312,6 +229,39 @@ function App({
    * Only "initial" can end in the approval prompt instead of "done": that's
    * the only phase where PM is instructed to stop short of Dev.
    */
+  /**
+   * Builds plan.html (full markdown render + a real flow chart of the
+   * pipeline, see planHtml.ts) next to plan.md, best-effort opens it in the
+   * OS's default browser, and switches the TUI into the approval screen.
+   * The HTML file is a convenience, not the source of truth — if nothing
+   * opens (no GUI/SSH session/no opener binary), the terminal's own
+   * full-screen plan view below is still there as the fallback.
+   */
+  function showApprovalScreen(freshLog: LogEntry[]) {
+    const planMarkdown = readPlanPreview(repoRoot, meta.feature);
+    setPlanPreview(planMarkdown);
+    setPlanScroll(0);
+
+    const htmlPath = featureFile(repoRoot, meta.feature, "planHtml");
+    try {
+      const html = buildPlanHtml({
+        feature: meta.feature,
+        clickupRef,
+        planMarkdown,
+        log: freshLog,
+        generatedAt: new Date().toLocaleString("th-TH"),
+      });
+      fs.writeFileSync(htmlPath, html, "utf8");
+      setPlanHtmlPath(htmlPath);
+      openInBrowser(htmlPath);
+    } catch {
+      // Best-effort only — the terminal view below never depends on this.
+      setPlanHtmlPath("");
+    }
+
+    setAwaitingApproval(true);
+  }
+
   function startPhase(phase: PmPhase) {
     const plan = buildPmSessionPlan(repoRoot, meta, permissionMode, clickupRef, phase);
     plan.logFile.write(plan.notice);
@@ -348,9 +298,7 @@ function App({
         freshLog.some((e) => e.step === "plan_awaiting_approval") &&
         !freshLog.some((e) => e.step === "dev_started");
       if (reachedApprovalPoint) {
-        setPlanPreview(readPlanPreview(repoRoot, meta.feature));
-        setPlanScroll(0);
-        setAwaitingApproval(true);
+        showApprovalScreen(freshLog);
       } else {
         setDone({ code: code ?? 0 });
       }
@@ -360,9 +308,7 @@ function App({
   useEffect(() => {
     const resume = determineResumePhase(repoRoot, meta.feature);
     if (resume === "awaitingApprovalResume") {
-      setPlanPreview(readPlanPreview(repoRoot, meta.feature));
-      setPlanScroll(0);
-      setAwaitingApproval(true);
+      showApprovalScreen(readLog(repoRoot, meta.feature));
     } else {
       startPhase(resume);
     }
@@ -395,7 +341,7 @@ function App({
   // summary at the top entirely. This view starts at the top and scrolls.
   const planWidth = Math.max(40, columns - 2);
   const planPanelHeight = Math.max(5, rows - HEADER_ROWS);
-  const planVisibleRows = Math.max(1, planPanelHeight - PANEL_CHROME_ROWS - 2);
+  const planVisibleRows = Math.max(1, planPanelHeight - PANEL_CHROME_ROWS - 3);
   const planLines = awaitingApproval ? renderPlanLines(planPreview, planWidth - PANEL_INNER_PADDING) : [];
   const planMaxScroll = Math.max(0, planLines.length - planVisibleRows);
 
@@ -456,6 +402,15 @@ function App({
             กด y หรือ Enter เพื่ออนุมัติและสั่ง Dev ต่อ · n ยกเลิก (แก้ plan.md เองได้แล้วรัน pmctl run ใหม่) · ↑/↓
             หรือ j/k เลื่อน · space/f หน้าถัดไป · b หน้าก่อนหน้า · g/G บนสุด/ล่างสุด
           </Text>
+          {planHtmlPath ? (
+            <Text dimColor>
+              เปิด flow chart + plan แบบเต็ม (พยายามเปิดเบราว์เซอร์ให้แล้ว): file://{planHtmlPath}
+            </Text>
+          ) : (
+            <Text dimColor color="red">
+              สร้าง/เปิด plan.html ไม่สำเร็จ — ดู plan ที่เลื่อนได้ด้านล่างแทน
+            </Text>
+          )}
           <Text dimColor>
             บรรทัด {planLines.length === 0 ? 0 : planScroll + 1}-{Math.min(planLines.length, planScroll + planVisibleRows)} จาก{" "}
             {planLines.length}

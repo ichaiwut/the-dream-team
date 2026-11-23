@@ -26,6 +26,7 @@ export const FILES = {
   devSession: "dev-session.log",
   reviewerSession: "reviewer-session.log",
   testerSession: "tester-session.log",
+  planHtml: "plan.html",
 };
 
 export function featureFile(repoRoot: string, feature: string, file: keyof typeof FILES): string {
