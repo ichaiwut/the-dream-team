@@ -138,7 +138,7 @@ export function buildPmSessionPlan(
     `ให้รัน "claude --help" เช็คชื่อ flag ปัจจุบันแล้วแก้ใน src/agents.ts\n` +
     `[pmctl] PM จะใช้ ClickUp connector ของบัญชีนี้เอง — tool เขียนของ ClickUp ถูกบล็อกผ่าน --disallowedTools ` +
     `(ดู src/clickupTools.ts ว่าบล็อกครบไหมก่อนใช้งานจริง)\n` +
-    `[pmctl] เพิ่ม allow rule "Bash(claude *)" ให้ ${meta.worktreePath}/.claude/settings.local.json แล้ว (ถ้ายังไม่มี) ` +
+    `[pmctl] เพิ่ม allow rule "Bash(claude -p *)" ให้ ${meta.worktreePath}/.claude/settings.local.json แล้ว (ถ้ายังไม่มี) ` +
     `เพื่อให้ PM สั่ง Dev/Reviewer/Tester ผ่าน bash ได้โดยไม่ติด approval prompt ที่ไม่มีใครตอบ — ` +
     `syntax นี้เดายังไม่ได้ verify กับ claude CLI จริง ถ้ายังเจอ "this command requires approval" ` +
     `ให้รัน claude แบบ interactive ในโฟลเดอร์นี้สักครั้ง กด allow ให้คำสั่ง claude -p แล้วเลือก "always allow" ` +

@@ -123,9 +123,23 @@ function computeChecklist(log: LogEntry[]): Checklist {
     if (idx !== -1 && idx > pointer) pointer = idx;
   }
 
+  // Before PM has appended its very first log line, pointer stays -1 — but
+  // PM is already alive and working toward step 0 (fetching the ClickUp
+  // spec), possibly for a while (a slow ClickUp call, or just a lot of
+  // reasoning). Without this, every item shows pending with no "current"
+  // marker at all, which reads as "nothing is happening" even while PM's
+  // own panel is visibly streaming output. Treating -1 like 0 here (for the
+  // *current* marker only — not for "done") fixes that without claiming
+  // step 0 is finished before it's logged as such.
+  const currentPointer = Math.max(pointer, 0);
   const items: ChecklistItem[] = PIPELINE.map((p, i) => ({
     ...p,
-    status: i < pointer ? "done" : i === pointer ? (i === PIPELINE.length - 1 ? "done" : "current") : "pending",
+    status:
+      i < pointer
+        ? "done"
+        : i === currentPointer
+          ? (i === PIPELINE.length - 1 ? "done" : "current")
+          : "pending",
   }));
 
   return { items, iterationCount, needsAttention };
