@@ -27,6 +27,37 @@ export interface Checklist {
   items: ChecklistItem[];
   iterationCount: number;
   needsAttention: boolean;
+  /**
+   * When the step that's currently "current" was entered (ISO timestamp from
+   * the log), and when the run's very first log line landed. Both are used
+   * to answer the one question a static checklist can't: "is this stuck, or
+   * just slow?" — a step sitting at 12m reads very differently from one at
+   * 3s, and without a number on screen there's no way to tell them apart.
+   * Null before anything has been logged at all.
+   */
+  currentSince: string | null;
+  startedAt: string | null;
+  /**
+   * The newest log entry's own words (roles/pm.md has every agent write a
+   * `reason` on each milestone). Shown as a live activity line so the panel
+   * says what's happening right now, not just which box is ticked.
+   */
+  latest: LogEntry | null;
+}
+
+/**
+ * Compact age, saaio-style: "4s", "12m", "1h3m". Deliberately short — it
+ * sits at the end of a line that's already carrying a label.
+ */
+export function formatAge(fromIso: string, now: number = Date.now()): string {
+  const ms = Math.max(0, now - new Date(fromIso).getTime());
+  const totalSec = Math.floor(ms / 1000);
+  if (totalSec < 60) return `${totalSec}s`;
+  const totalMin = Math.floor(totalSec / 60);
+  if (totalMin < 60) return `${totalMin}m`;
+  const hours = Math.floor(totalMin / 60);
+  const mins = totalMin % 60;
+  return mins === 0 ? `${hours}h` : `${hours}h${mins}m`;
 }
 
 /**
@@ -41,11 +72,16 @@ export function computeChecklist(log: LogEntry[]): Checklist {
   let pointer = -1;
   let iterationCount = 0;
   let needsAttention = false;
+  // Timestamp of the log line that last moved the pointer forward (or rolled
+  // it back on an iteration) — i.e. when the step now showing as "current"
+  // actually began, not when the run as a whole started.
+  let currentSince: string | null = null;
 
   for (const entry of log) {
     if (entry.step === "iteration") {
       iterationCount++;
       pointer = Math.min(pointer, 2); // back to right after plan_awaiting_approval
+      currentSince = entry.ts;
       continue;
     }
     if (entry.step === "needs_po_attention") {
@@ -53,7 +89,10 @@ export function computeChecklist(log: LogEntry[]): Checklist {
       continue;
     }
     const idx = PIPELINE.findIndex((p) => p.id === entry.step);
-    if (idx !== -1 && idx > pointer) pointer = idx;
+    if (idx !== -1 && idx > pointer) {
+      pointer = idx;
+      currentSince = entry.ts;
+    }
   }
 
   // Before PM has appended its very first log line, pointer stays -1 — but
@@ -75,7 +114,14 @@ export function computeChecklist(log: LogEntry[]): Checklist {
           : "pending",
   }));
 
-  return { items, iterationCount, needsAttention };
+  return {
+    items,
+    iterationCount,
+    needsAttention,
+    currentSince,
+    startedAt: log.length > 0 ? log[0].ts : null,
+    latest: log.length > 0 ? log[log.length - 1] : null,
+  };
 }
 
 export function checklistColor(status: ChecklistItem["status"]): string | undefined {

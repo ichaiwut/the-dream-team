@@ -10,8 +10,9 @@ import { buildPmSessionPlan, spawnClaudeProcess, PmPhase } from "./agents.js";
 // PIPELINE/checklist logic lives in pipeline.ts so plan.html's flow chart
 // (planHtml.ts) computes the exact same checklist the TUI shows here,
 // instead of drifting out of sync with a second copy of this logic.
-import { computeChecklist, checklistColor, checklistMark } from "./pipeline.js";
+import { computeChecklist, checklistColor, checklistMark, formatAge } from "./pipeline.js";
 import { buildPlanHtml, openInBrowser, hasOpenQuestions } from "./planHtml.js";
+import { notify } from "./notify.js";
 
 const LOG_POLL_MS = 1000;
 const MAX_LINES = 2000;
@@ -36,6 +37,13 @@ function isTransientError(text: string): boolean {
 }
 const MAX_TRANSIENT_RETRIES = 5;
 const RETRY_DELAYS_MS = [5000, 15000, 30000, 60000, 60000];
+
+// How long one pipeline step can sit without a new log line before its age
+// is shown in red. Not a timeout and nothing acts on it — a real Dev change
+// or a full e2e run can legitimately take longer. It only marks the point
+// where "is it stuck?" stops being paranoia, which is the exact question
+// the old checklist (no times at all) gave you no way to answer.
+const SLOW_STEP_MS = 10 * 60 * 1000;
 
 // Rows the chrome around the panels takes up: title line + its blank
 // margin line + each panel's own header line + its top/bottom border.
@@ -247,6 +255,18 @@ function App({
   // buildInitialPrompt's continueAfterApproval branch in src/agents.ts).
   const [answering, setAnswering] = useState(false);
   const [answerText, setAnswerText] = useState("");
+  // Scrollback position in the PM transcript: null means "live" (pinned to
+  // the newest output, the original behaviour), a number is the index of the
+  // first visible wrapped line. The panel kept MAX_LINES of history all
+  // along but only ever showed the tail, so anything that scrolled past —
+  // what Dev actually reported twenty minutes ago — was only recoverable by
+  // opening the session log in another window.
+  const [pmScroll, setPmScroll] = useState<number | null>(null);
+  // Layout numbers the key handler needs for clamping, published from the
+  // render below. They can't be closed over directly: the approval and
+  // answer views return before the main layout is computed.
+  const pmMaxScrollRef = useRef(0);
+  const pmVisibleRowsRef = useRef(1);
   const childRef = useRef<ChildProcessByStdio<null, Readable, Readable> | null>(null);
   const tailRef = useRef(""); // carries a partial last line between chunks
   const retryTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -256,6 +276,10 @@ function App({
   // appears, without waiting on the child process's own "close" event.
   const currentPhaseRef = useRef<PmPhase | null>(null);
   const approvalShownRef = useRef(false);
+  // One notification per state change, not one per poll tick — the log line
+  // that triggered it stays in the log forever, so without this the PO would
+  // get a bell every second for the rest of the run.
+  const attentionNotifiedRef = useRef(false);
 
   function clearPendingRetry() {
     if (retryTimeoutRef.current) {
@@ -301,6 +325,14 @@ function App({
       setPlanHtmlPath("");
     }
 
+    // The one moment in a whole run where nothing moves until a human comes
+    // back — exactly the moment worth interrupting them for.
+    notify(
+      `pmctl: ${meta.feature} รออนุมัติ plan`,
+      hasOpenQuestions(planMarkdown)
+        ? "PM เขียน plan เสร็จแล้วและมีคำถามถึง PO — กด a เพื่อตอบ หรือ y เพื่ออนุมัติ"
+        : "PM เขียน plan เสร็จแล้ว รอ PO กด y เพื่ออนุมัติ"
+    );
     setAwaitingApproval(true);
   }
 
@@ -371,6 +403,14 @@ function App({
       if (reachedApprovalPoint) {
         showApprovalScreen(freshLog);
       } else {
+        // The run is over either way — if you walked away expecting to come
+        // back to a finished feature, this is what tells you it's time.
+        notify(
+          `pmctl: ${meta.feature} ${exitCode === 0 ? "จบงานแล้ว" : "จบแบบมี error"}`,
+          exitCode === 0
+            ? "ทุกขั้นตอนเสร็จ — กลับมาดูผลและทดสอบ acceptance ได้"
+            : `PM session จบด้วย exit code ${exitCode}`
+        );
         setDone({ code: exitCode });
       }
     });
@@ -401,6 +441,16 @@ function App({
       const agent = computeActiveAgent(freshLog);
       setSubAgent(agent);
       setSubLines(readSubAgentLines(repoRoot, meta.feature, agent));
+
+      // PM logs this when Dev/Reviewer/Tester hit a decision only the PO can
+      // make (roles/pm.md's communication rules). The run keeps going, but
+      // its final answer is a question — worth a nudge, not just a red line
+      // on a panel nobody's looking at.
+      if (!attentionNotifiedRef.current && freshLog.some((e) => e.step === "needs_po_attention")) {
+        attentionNotifiedRef.current = true;
+        const entry = [...freshLog].reverse().find((e) => e.step === "needs_po_attention");
+        notify(`pmctl: ${meta.feature} ต้องการให้ PO ตัดสินใจ`, entry?.reason ?? "ดูคำตอบสุดท้ายของ PM");
+      }
 
       // PM is instructed (roles/pm.md) to log `plan_awaiting_approval` and
       // stop immediately — but a real run showed it sometimes keeps going
@@ -508,6 +558,33 @@ function App({
       } else if (input === "G") {
         setPlanScroll(planMaxScroll);
       }
+      return;
+    }
+    // Scrollback over the PM transcript, on saaio's keys so the muscle
+    // memory carries over: `[` enters, q/Esc returns to live, k/j by line,
+    // Ctrl-U/Ctrl-D by half a screen, Ctrl-B/Ctrl-F by a full screen, g/G
+    // for the ends. Output keeps streaming in behind the scrolled view
+    // rather than yanking it back to the bottom — the whole point is to
+    // read something while the run carries on.
+    const page = pmVisibleRowsRef.current;
+    const maxScroll = pmMaxScrollRef.current;
+    if (pmScroll !== null) {
+      const at = Math.min(pmScroll, maxScroll);
+      if (input === "q" || key.escape) setPmScroll(null);
+      else if (input === "k" || key.upArrow) setPmScroll(Math.max(0, at - 1));
+      else if (input === "j" || key.downArrow) setPmScroll(Math.min(maxScroll, at + 1));
+      else if (key.ctrl && input === "u") setPmScroll(Math.max(0, at - Math.floor(page / 2)));
+      else if (key.ctrl && input === "d") setPmScroll(Math.min(maxScroll, at + Math.floor(page / 2)));
+      else if (key.ctrl && input === "b") setPmScroll(Math.max(0, at - page));
+      else if (key.ctrl && input === "f") setPmScroll(Math.min(maxScroll, at + page));
+      else if (input === "g") setPmScroll(0);
+      else if (input === "G") setPmScroll(null); // the bottom *is* live
+      return;
+    }
+    if (input === "[") {
+      // Start where the live view already was, so entering scrollback never
+      // jumps the text you were reading.
+      setPmScroll(maxScroll);
       return;
     }
     if (done && (input === "q" || key.return)) {
@@ -622,7 +699,30 @@ function App({
 
   const checklist = computeChecklist(log);
   const subPanelTitle = subAgent ? AGENT_PANEL_TITLE[subAgent] : "SUB-AGENT (ยังไม่เริ่ม)";
-  const footerHint = done ? ", q/Enter ออก" : "";
+
+  // PM transcript, wrapped once and then either tailed (live) or windowed
+  // (scrollback). The clamps are published to refs for the key handler,
+  // which runs outside this render path.
+  const pmWrapped = wrapLines(lines, pmWidth - PANEL_INNER_PADDING);
+  const pmMaxScroll = Math.max(0, pmWrapped.length - visibleRows);
+  pmMaxScrollRef.current = pmMaxScroll;
+  pmVisibleRowsRef.current = visibleRows;
+  const pmFirstVisible = pmScroll === null ? Math.max(0, pmWrapped.length - visibleRows) : Math.min(pmScroll, pmMaxScroll);
+  const pmVisible = pmWrapped.slice(pmFirstVisible, pmFirstVisible + visibleRows);
+  const footerHint = done ? ", q/Enter ออก" : ", [ เลื่อนดูย้อนหลัง";
+  // Recomputed on every render, and the log poll re-renders once a second,
+  // so these tick on their own without a second timer.
+  const runAge = checklist.startedAt ? formatAge(checklist.startedAt) : null;
+  const currentAge = checklist.currentSince ? formatAge(checklist.currentSince) : null;
+  // The step that's been sitting still long enough to be worth a second
+  // look. Not an error — plenty of legitimate steps (a big Dev change, a
+  // full e2e run) take longer than this — just the point where "is it stuck
+  // or is it working?" becomes a fair question, so the number turns red
+  // rather than staying quietly dim.
+  const currentIsSlow =
+    checklist.currentSince !== null &&
+    Date.now() - new Date(checklist.currentSince).getTime() > SLOW_STEP_MS &&
+    !done;
 
   return (
     <Box flexDirection="column" width={columns} height={rows}>
@@ -630,7 +730,7 @@ function App({
         <Text bold>pmctl run — {meta.feature}</Text>
         <Text dimColor>
           {" "}
-          (branch={meta.branch}) — Ctrl+C ยกเลิก{footerHint}
+          (branch={meta.branch}){runAge ? ` — รันมาแล้ว ${runAge}` : ""} — Ctrl+C ยกเลิก{footerHint}
         </Text>
       </Box>
       <Box marginTop={1} height={panelHeight}>
@@ -640,9 +740,14 @@ function App({
           </Text>
           {checklist.items.map((item) => {
             const stuck = item.status === "current" && checklist.needsAttention;
+            // Only the in-flight step carries an age: a "done" step's own
+            // duration is history the log already has, and showing ten of
+            // them turns the checklist into a table nobody reads.
+            const age = item.status === "current" && currentAge ? ` ${currentAge}` : "";
             return (
               <Text key={item.id} color={stuck ? "red" : checklistColor(item.status)} bold={item.status === "current"}>
                 {stuck ? "⚠" : checklistMark(item.status)} {item.label}
+                {age ? <Text color={currentIsSlow ? "red" : "gray"}>{age}</Text> : ""}
               </Text>
             );
           })}
@@ -654,6 +759,22 @@ function App({
               ⚠ ต้องการให้ PO ตัดสินใจ — ดูคำตอบสุดท้ายของ PM
             </Text>
           )}
+          {checklist.latest && (
+            // What's actually happening right now, in the agent's own words
+            // (every milestone in roles/pm.md carries a `reason`). A ticked
+            // box says which stage we're at; this says what's going on
+            // inside it — the difference between "working" and "stuck".
+            <Box marginTop={1} flexDirection="column">
+              <Text dimColor>ล่าสุด ({checklist.latest.actor}):</Text>
+              {wrapLine(checklist.latest.reason, Math.max(10, checklistWidth - PANEL_INNER_PADDING))
+                .slice(0, 4)
+                .map((l, i) => (
+                  <Text key={i} dimColor wrap="truncate-end">
+                    {l}
+                  </Text>
+                ))}
+            </Box>
+          )}
         </Box>
 
         <Box
@@ -664,17 +785,22 @@ function App({
           paddingX={1}
           marginLeft={1}
         >
-          <Text bold dimColor>
-            PM SESSION (live)
-          </Text>
+          {pmScroll === null ? (
+            <Text bold dimColor>
+              PM SESSION (live)
+            </Text>
+          ) : (
+            <Text bold color="cyan">
+              PM SESSION (ย้อนหลัง {pmFirstVisible + 1}-{Math.min(pmWrapped.length, pmFirstVisible + visibleRows)} จาก{" "}
+              {pmWrapped.length} · q/Esc กลับ live)
+            </Text>
+          )}
           {lines.length === 0 && !done && <Text dimColor>(กำลังเริ่ม...)</Text>}
-          {wrapLines(lines, pmWidth - PANEL_INNER_PADDING)
-            .slice(-visibleRows)
-            .map((l, i) => (
-              <Text key={i} wrap="truncate-end">
-                {l}
-              </Text>
-            ))}
+          {pmVisible.map((l, i) => (
+            <Text key={i} wrap="truncate-end">
+              {l}
+            </Text>
+          ))}
           {done && !done.rejected && (
             <Text bold color={done.code === 0 ? "green" : "red"}>
               -- จบแล้ว (exit code {done.code}) --
