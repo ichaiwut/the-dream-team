@@ -23,6 +23,9 @@ export const FILES = {
   report: "report.md",
   log: "log.ndjson",
   pmSession: "pm-session.log",
+  devSession: "dev-session.log",
+  reviewerSession: "reviewer-session.log",
+  testerSession: "tester-session.log",
 };
 
 export function featureFile(repoRoot: string, feature: string, file: keyof typeof FILES): string {

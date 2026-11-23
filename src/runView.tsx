@@ -2,19 +2,72 @@ import React, { useEffect, useRef, useState } from "react";
 import { render, Box, Text, useInput, useApp } from "ink";
 import { ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
+import fs from "node:fs";
 import { Meta } from "./worktree.js";
 import { readLog, LogEntry } from "./log.js";
+import { featureFile } from "./paths.js";
 import { buildPmSessionPlan, spawnClaudeProcess } from "./agents.js";
 
 const LOG_POLL_MS = 1000;
 const MAX_LINES = 2000;
 
-// Rows the chrome around the two panels takes up: title line + its blank
+// Rows the chrome around the panels takes up: title line + its blank
 // margin line + each panel's own header line + its top/bottom border.
 const HEADER_ROWS = 2;
 const PANEL_CHROME_ROWS = 3;
-const CHECKLIST_WIDTH_RATIO = 0.28;
-const MIN_CHECKLIST_WIDTH = 30;
+const CHECKLIST_WIDTH_RATIO = 0.22;
+const MIN_CHECKLIST_WIDTH = 28;
+const MIN_SIDE_PANEL_WIDTH = 30;
+
+// Which sub-agent is "active" right now, derived from the log's most recent
+// `<agent>_started` entry (see computeActiveAgent below) — used to decide
+// which raw --output-format json transcript (teed to its own session log by
+// roles/pm.md) to show in the third panel.
+type SubAgent = "dev" | "reviewer" | "tester";
+
+const AGENT_PANEL_TITLE: Record<SubAgent, string> = {
+  dev: "DEV SESSION (live)",
+  reviewer: "REVIEWER SESSION (live)",
+  tester: "TESTER SESSION (live)",
+};
+
+const AGENT_LOG_FILE: Record<SubAgent, "devSession" | "reviewerSession" | "testerSession"> = {
+  dev: "devSession",
+  reviewer: "reviewerSession",
+  tester: "testerSession",
+};
+
+/**
+ * Picks whichever sub-agent most recently started, by scanning the log in
+ * order. Naturally follows PM back to "dev" on every iteration, since
+ * roles/pm.md logs a fresh "dev_started" each time it loops Dev back in —
+ * no special-casing of "iteration" needed here. Returns null before Dev has
+ * ever been dispatched (steps 0/1, ClickUp fetch + plan, have no sub-agent
+ * transcript to show yet).
+ */
+function computeActiveAgent(log: LogEntry[]): SubAgent | null {
+  let agent: SubAgent | null = null;
+  for (const entry of log) {
+    if (entry.step === "dev_started") agent = "dev";
+    else if (entry.step === "reviewer_started") agent = "reviewer";
+    else if (entry.step === "tester_started") agent = "tester";
+  }
+  return agent;
+}
+
+/** Each sub-agent's session log is overwritten (`tee`, not `tee -a`) on every
+ * fresh invocation by roles/pm.md, so reading it whole on every poll always
+ * reflects that agent's current/latest round rather than every past one. */
+function readSubAgentLines(repoRoot: string, feature: string, agent: SubAgent | null): string[] {
+  if (!agent) return [];
+  const file = featureFile(repoRoot, feature, AGENT_LOG_FILE[agent]);
+  if (!fs.existsSync(file)) return [];
+  try {
+    return splitLines(fs.readFileSync(file, "utf8"));
+  } catch {
+    return [];
+  }
+}
 
 // The canonical PO->PM->Dev->Tester pipeline, in order, as roles/pm.md
 // instructs PM to log it (log.ts' step field). Used to render a todo-style
@@ -130,6 +183,8 @@ function App({
   const { columns, rows } = useTerminalSize();
   const [lines, setLines] = useState<string[]>([]);
   const [log, setLog] = useState<LogEntry[]>(() => readLog(repoRoot, meta.feature));
+  const [subAgent, setSubAgent] = useState<SubAgent | null>(() => computeActiveAgent(readLog(repoRoot, meta.feature)));
+  const [subLines, setSubLines] = useState<string[]>([]);
   const [done, setDone] = useState<{ code: number } | null>(null);
   const childRef = useRef<ChildProcessByStdio<null, Readable, Readable> | null>(null);
   const tailRef = useRef(""); // carries a partial last line between chunks
@@ -175,7 +230,13 @@ function App({
   }, []);
 
   useEffect(() => {
-    const timer = setInterval(() => setLog(readLog(repoRoot, meta.feature)), LOG_POLL_MS);
+    const timer = setInterval(() => {
+      const freshLog = readLog(repoRoot, meta.feature);
+      setLog(freshLog);
+      const agent = computeActiveAgent(freshLog);
+      setSubAgent(agent);
+      setSubLines(readSubAgentLines(repoRoot, meta.feature, agent));
+    }, LOG_POLL_MS);
     return () => clearInterval(timer);
   }, [repoRoot, meta.feature]);
 
@@ -196,11 +257,28 @@ function App({
   // columns/rows instead of hardcoding them, and recompute whenever the
   // terminal is resized (useTerminalSize above).
   const checklistWidth = Math.max(MIN_CHECKLIST_WIDTH, Math.floor(columns * CHECKLIST_WIDTH_RATIO));
-  const pmWidth = Math.max(40, columns - checklistWidth - 3); // 3 = gap + borders between panels
-  const panelHeight = Math.max(5, rows - HEADER_ROWS);
+  // Three side-by-side panels need real width to stay readable; below this,
+  // an 80-col terminal (a common default) would overflow. Below the
+  // threshold, fall back to the original two-panel layout — checklist + PM
+  // session only — rather than cramming a third panel no one can read.
+  const showSubPanel = columns >= 100;
+  let pmWidth: number;
+  let subWidth: number;
+  if (showSubPanel) {
+    const remainingWidth = columns - checklistWidth - 4; // 4 = two 1-col gaps between three panels
+    pmWidth = Math.max(MIN_SIDE_PANEL_WIDTH, Math.ceil(remainingWidth / 2));
+    subWidth = Math.max(MIN_SIDE_PANEL_WIDTH, remainingWidth - pmWidth);
+  } else {
+    pmWidth = Math.max(40, columns - checklistWidth - 3); // 3 = gap + borders between two panels
+    subWidth = 0;
+  }
+  // Narrow-terminal fallback prints one extra hint line below the panels,
+  // so reserve a row for it or the layout would overflow the real terminal.
+  const panelHeight = Math.max(5, rows - HEADER_ROWS - (showSubPanel ? 0 : 1));
   const visibleRows = Math.max(1, panelHeight - PANEL_CHROME_ROWS - (done ? 1 : 0));
 
   const checklist = computeChecklist(log);
+  const subPanelTitle = subAgent ? AGENT_PANEL_TITLE[subAgent] : "SUB-AGENT (ยังไม่เริ่ม)";
 
   return (
     <Box flexDirection="column" width={columns} height={rows}>
@@ -254,7 +332,32 @@ function App({
             </Text>
           )}
         </Box>
+
+        {showSubPanel && (
+          <Box
+            flexDirection="column"
+            width={subWidth}
+            height={panelHeight}
+            borderStyle="single"
+            paddingX={1}
+            marginLeft={1}
+          >
+            <Text bold dimColor>
+              {subPanelTitle}
+            </Text>
+            {!subAgent && <Text dimColor>(PM ยังไม่ได้สั่ง Dev/Reviewer/Tester)</Text>}
+            {subAgent && subLines.length === 0 && <Text dimColor>(รอผลลัพธ์...)</Text>}
+            {subLines.slice(-visibleRows).map((l, i) => (
+              <Text key={i} wrap="truncate-end">
+                {l}
+              </Text>
+            ))}
+          </Box>
+        )}
       </Box>
+      {!showSubPanel && (
+        <Text dimColor>ขยายเทอร์มินัลให้กว้าง ≥100 คอลัมน์ เพื่อดูพาเนล Dev/Reviewer/Tester แยก</Text>
+      )}
     </Box>
   );
 }

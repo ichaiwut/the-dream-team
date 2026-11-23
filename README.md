@@ -85,7 +85,7 @@ pmctl run add-dark-mode --clickup "..." --isolate
 
 ### Watching it work — one terminal, no second window needed
 
-When stdin/stdout are a real terminal, `pmctl run` itself opens a live Ink UI: PM's raw output streams in a panel on the left, and this feature's step log (the same thing `pmctl log`/`status` show) updates next to it on the right, polled once a second. `Ctrl+C` kills the PM session and exits; once PM finishes, press `q` or `Enter` to close the UI (its exit code becomes `pmctl run`'s own exit code). There's no second terminal to open for this — you're already looking at it.
+When stdin/stdout are a real terminal, `pmctl run` itself opens a live Ink UI that fills the screen: a todo-style checklist against the PM→Dev→Reviewer→Tester pipeline on the left (polled once a second from the same log `pmctl log`/`status` read), PM's own raw session output next to it, and — on terminals ≥100 columns wide — a third panel that auto-switches to whichever sub-agent is currently active (Dev, Reviewer, or Tester), so you can actually read what PM told it to do and what it answered, instead of that exchange being buried unreadable inside PM's own output. On narrower terminals that third panel is dropped rather than cramming three unreadable columns in; widen the terminal to get it back. `Ctrl+C` kills the PM session and exits; once PM finishes, press `q` or `Enter` to close the UI (its exit code becomes `pmctl run`'s own exit code). There's no second terminal to open for this — you're already looking at it.
 
 When stdin/stdout aren't a real TTY (piped output, CI, `pmctl run` invoked from another script), it falls back to the old plain text streaming straight to stdout — Ink needs real terminal raw-mode support that isn't available there.
 
@@ -126,11 +126,17 @@ pmctl clean add-dark-mode    # removes the worktree (--isolate runs only); .pmct
   review.md       # written by Reviewer before Tester is allowed to run
   report.md       # written by Tester after running real tests
   log.ndjson      # append-only; every PM/Dev/Reviewer/Tester milestone, with reasons
-  pm-session.log  # raw transcript of the PM session, for deep debugging
+  pm-session.log      # raw transcript of the PM session, for deep debugging
+  dev-session.log      # raw --output-format json transcript of Dev's latest invocation
+  reviewer-session.log # same, for Reviewer's latest invocation
+  tester-session.log   # same, for Tester's latest invocation
 ```
+
+The three `*-session.log` files are overwritten (not appended) on each new invocation — they always reflect that agent's current/latest round, not a combined history across iterations; `log.ndjson` is the durable cross-round record. `pmctl run`'s third panel (see above) tails whichever one matches the currently active agent.
 
 ## Known limitations
 
 - **"Read-only ClickUp access" is a blocklist, not a structural guarantee.** `src/clickupTools.ts` names every write-capable ClickUp MCP tool visible when this was written, passed to `--disallowedTools`. If the ClickUp connector adds a new write tool later and this list isn't updated, PM would not be blocked from using it. Re-check it periodically. (An earlier version of this tool used a manually-exported `CLICKUP_API_TOKEN` that was never forwarded to subprocesses — a stronger, credential-level guarantee, at the cost of one extra setup step and not reusing your existing connector. Revert to that approach in `src/agents.ts`/`roles/pm.md` if the blocklist's weaker guarantee isn't acceptable for your use case.)
 - Not yet validated end-to-end against a live `claude` CLI — the environment this was built in doesn't have Claude Code installed, so `--disallowedTools` blocking the right tool names has not been confirmed against a real ClickUp connector either. The worktree/port/log mechanics are tested and working; the PM→Dev→Reviewer→Tester loop and the tool-blocking has only been verified at the level of "does it assemble the right command," not a real run. Expect to adjust flags, tool names, or prompt wording on first use.
 - No sandboxing beyond what `--permission-mode` and `--disallowedTools` give you. `acceptEdits` auto-accepts file changes from Dev with no human in the loop — for anything touching production data or paying customers, use a stricter permission mode or review the diff before merging regardless of what Tester reports.
+- The Dev/Reviewer/Tester panel in `pmctl run` shows the raw `--output-format json` reply as-is — readable as *which* panel is active, but not guaranteed to be pretty-printed prose, since this was built without a real `claude` CLI to check that format against. If it renders as one dense JSON blob instead of readable turns on your installed version, that's a formatting gap, not a bug in which agent is shown; pretty-printing it properly needs the real JSON shape to build against.

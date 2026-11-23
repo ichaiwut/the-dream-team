@@ -31,6 +31,13 @@ function buildVars(repoRoot: string, meta: Meta): Record<string, string> {
     DEV_ROLE_PATH: path.join(ROLES_DIR, "dev.md"),
     REVIEWER_ROLE_PATH: path.join(ROLES_DIR, "reviewer.md"),
     TESTER_ROLE_PATH: path.join(ROLES_DIR, "tester.md"),
+    // Where PM tees each sub-agent's raw --output-format json reply, purely
+    // so src/runView.tsx can tail a readable transcript per agent. PM still
+    // reads the JSON from its own bash tool's stdout as before — `tee` just
+    // makes a second copy, it doesn't change what PM itself sees.
+    DEV_SESSION_LOG: path.join(dir, FILES.devSession),
+    REVIEWER_SESSION_LOG: path.join(dir, FILES.reviewerSession),
+    TESTER_SESSION_LOG: path.join(dir, FILES.testerSession),
     // Same blocklist PM itself is spawned with (src/clickupTools.ts). PM's
     // role prompt uses this to pass --disallowedTools when it spawns Dev,
     // Reviewer and Tester, so "no ClickUp access" is enforced at the

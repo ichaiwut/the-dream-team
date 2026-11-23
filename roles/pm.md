@@ -63,9 +63,9 @@ claude -p "<คำสั่งงานที่ derive มาจาก plan.md 
   --append-system-prompt "$(cat {{DEV_ROLE_PATH}})" \
   --permission-mode acceptEdits \
   --disallowedTools "{{CLICKUP_DISALLOWED_TOOLS}}" \
-  --output-format json
+  --output-format json | tee {{DEV_SESSION_LOG}}
 ```
-รันโดยมี cwd เป็น `{{WORKTREE_PATH}}` (`--disallowedTools` ตรงนี้คือบล็อก tool เขียนของ ClickUp ให้ Dev ด้วย เหมือนที่คุณโดนบล็อกเอง — ไม่ใช่แค่บอกด้วยคำพูด ถ้า flag เหล่านี้ใช้ไม่ได้กับเวอร์ชัน claude CLI ที่ลงไว้ ให้รัน `claude --help` เพื่อดู flag จริงแล้วปรับคำสั่งเอง)
+รันโดยมี cwd เป็น `{{WORKTREE_PATH}}` (`--disallowedTools` ตรงนี้คือบล็อก tool เขียนของ ClickUp ให้ Dev ด้วย เหมือนที่คุณโดนบล็อกเอง — ไม่ใช่แค่บอกด้วยคำพูด ถ้า flag เหล่านี้ใช้ไม่ได้กับเวอร์ชัน claude CLI ที่ลงไว้ ให้รัน `claude --help` เพื่อดู flag จริงแล้วปรับคำสั่งเอง — `| tee {{DEV_SESSION_LOG}}` เป็นแค่สำเนาผลลัพธ์ไว้ให้ UI โชว์ ไม่กระทบสิ่งที่คุณเห็นจาก bash tool ของคุณเอง อย่าตัดส่วนนี้ออก)
 
 ก่อนเรียกให้ append log `step":"dev_started"` พร้อมเหตุผล/สรุปงานที่สั่ง
 หลัง Dev ตอบกลับ append log `"step":"dev_done"` พร้อมสรุปว่า Dev บอกว่าทำอะไรไปบ้าง
@@ -77,9 +77,9 @@ claude -p "<สรุปงานที่ Dev เพิ่งทำ พร้�
   --append-system-prompt "$(cat {{REVIEWER_ROLE_PATH}})" \
   --permission-mode acceptEdits \
   --disallowedTools "Edit,Write,{{CLICKUP_DISALLOWED_TOOLS}}" \
-  --output-format json
+  --output-format json | tee {{REVIEWER_SESSION_LOG}}
 ```
-รันโดยมี cwd เป็น `{{WORKTREE_PATH}}` เหมือนกัน (`Edit,Write` คือกันไม่ให้ Reviewer แก้ไฟล์เอง มีหน้าที่แค่ตรวจ ส่วนรายชื่อ ClickUp tool ต่อท้ายคือบล็อกการเขียน ClickUp เหมือน Dev)
+รันโดยมี cwd เป็น `{{WORKTREE_PATH}}` เหมือนกัน (`Edit,Write` คือกันไม่ให้ Reviewer แก้ไฟล์เอง มีหน้าที่แค่ตรวจ ส่วนรายชื่อ ClickUp tool ต่อท้ายคือบล็อกการเขียน ClickUp เหมือน Dev — `| tee {{REVIEWER_SESSION_LOG}}` เหมือนกับ Dev ด้านบน อย่าตัดออก)
 
 ก่อนเรียก append log `"step":"reviewer_started"`
 Reviewer จะเขียนผลตรวจไว้ที่ `{{REVIEW_PATH}}` เอง (PASS/FAIL พร้อมเหตุผล) — อ่านไฟล์นั้นเพื่อรู้ผล:
@@ -87,7 +87,7 @@ Reviewer จะเขียนผลตรวจไว้ที่ `{{REVIEW_PAT
 - **FAIL**: append log `"step":"iteration"` พร้อมเหตุผลจาก Reviewer (เช่น security risk ตรงไหน, bad pattern อะไร) แล้ววนกลับไปขั้นตอน 2 สั่ง Dev แก้ตามที่ Reviewer ระบุ **ห้ามส่งต่อ Tester จนกว่า Reviewer จะ PASS**
 
 ### 4. สั่ง Tester (หลัง Reviewer PASS แล้วเท่านั้น)
-เรียกแบบเดียวกับขั้นตอน 2 ทุกอย่าง (รวมถึง `--disallowedTools "{{CLICKUP_DISALLOWED_TOOLS}}"` ที่บล็อก ClickUp เหมือนกัน) แต่ใช้ `--append-system-prompt "$(cat {{TESTER_ROLE_PATH}})"` ส่ง context ให้ Tester รู้ว่า Dev เพิ่งทำอะไร (สรุปจากขั้นตอน 2) และพาธ `{{REPORT_PATH}}` ที่ต้องเขียน
+เรียกแบบเดียวกับขั้นตอน 2 ทุกอย่าง (รวมถึง `--disallowedTools "{{CLICKUP_DISALLOWED_TOOLS}}"` ที่บล็อก ClickUp เหมือนกัน) แต่ใช้ `--append-system-prompt "$(cat {{TESTER_ROLE_PATH}})"` ส่ง context ให้ Tester รู้ว่า Dev เพิ่งทำอะไร (สรุปจากขั้นตอน 2) และพาธ `{{REPORT_PATH}}` ที่ต้องเขียน และ pipe ผลลัพธ์ผ่าน `| tee {{TESTER_SESSION_LOG}}` เหมือน Dev/Reviewer
 append log `"step":"tester_started"` ก่อนเรียก และ `"step":"tester_done"` พร้อมผล pass/fail หลัง Tester ตอบกลับ
 
 ### 5. ถ้า Reviewer หรือ Tester รายงาน fail
