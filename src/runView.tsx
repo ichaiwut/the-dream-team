@@ -6,7 +6,7 @@ import fs from "node:fs";
 import { Meta } from "./worktree.js";
 import { readLog, LogEntry } from "./log.js";
 import { featureFile } from "./paths.js";
-import { buildPmSessionPlan, spawnClaudeProcess } from "./agents.js";
+import { buildPmSessionPlan, spawnClaudeProcess, PmPhase } from "./agents.js";
 
 const LOG_POLL_MS = 1000;
 const MAX_LINES = 2000;
@@ -69,12 +69,44 @@ function readSubAgentLines(repoRoot: string, feature: string, agent: SubAgent | 
   }
 }
 
+/**
+ * Which PM invocation `pmctl run` should start with, given whatever's
+ * already on disk for this feature — so re-running `pmctl run` on a feature
+ * whose plan is already written (the PO edited plan.md by hand, or just
+ * came back after `pmctl run` exited) resumes sensibly instead of either
+ * redoing the ClickUp fetch/plan from scratch or silently re-asking for
+ * approval of work that's already past it:
+ *   - no plan.md yet -> "initial" (normal start for a brand-new feature)
+ *   - plan.md exists, Dev never dispatched -> "awaitingApprovalResume"
+ *     (don't spawn anything yet; show the approval prompt immediately)
+ *   - plan.md exists and Dev was already dispatched at some point -> treat
+ *     the plan as already (implicitly) approved and continue from Dev
+ */
+type ResumeDecision = PmPhase | "awaitingApprovalResume";
+
+function determineResumePhase(repoRoot: string, feature: string): ResumeDecision {
+  const planPath = featureFile(repoRoot, feature, "plan");
+  if (!fs.existsSync(planPath)) return "initial";
+  const log = readLog(repoRoot, feature);
+  return log.some((e) => e.step === "dev_started") ? "continueAfterApproval" : "awaitingApprovalResume";
+}
+
+function readPlanPreview(repoRoot: string, feature: string): string {
+  const planPath = featureFile(repoRoot, feature, "plan");
+  try {
+    return fs.existsSync(planPath) ? fs.readFileSync(planPath, "utf8") : "(ไม่พบ plan.md)";
+  } catch {
+    return "(อ่าน plan.md ไม่สำเร็จ)";
+  }
+}
+
 // The canonical PO->PM->Dev->Tester pipeline, in order, as roles/pm.md
 // instructs PM to log it (log.ts' step field). Used to render a todo-style
 // checklist instead of a raw dump of log lines.
 const PIPELINE: { id: string; label: string }[] = [
   { id: "spec_fetched", label: "ดึง spec จาก ClickUp" },
   { id: "plan_written", label: "วางแผน (plan.md)" },
+  { id: "plan_awaiting_approval", label: "รอ PO อนุมัติ plan" },
   { id: "dev_started", label: "สั่ง Dev" },
   { id: "dev_done", label: "Dev ทำงานเสร็จ" },
   { id: "reviewer_started", label: "สั่ง Reviewer ตรวจโค้ด" },
@@ -100,9 +132,9 @@ interface Checklist {
  * Turns the append-only log into a todo-style checklist against the fixed
  * pipeline above. Since Dev/Tester can be looped back into on a test
  * failure ("iteration" in roles/pm.md's step 4), the pointer rolls back to
- * just after plan_written on every iteration, so mid-loop the checklist
- * correctly shows Dev/Tester as pending again rather than staying "done"
- * from an earlier failed round.
+ * just after the plan was approved on every iteration, so mid-loop the
+ * checklist correctly shows Dev/Tester as pending again rather than staying
+ * "done" from an earlier failed round.
  */
 function computeChecklist(log: LogEntry[]): Checklist {
   let pointer = -1;
@@ -112,7 +144,7 @@ function computeChecklist(log: LogEntry[]): Checklist {
   for (const entry of log) {
     if (entry.step === "iteration") {
       iterationCount++;
-      pointer = Math.min(pointer, 1); // back to right after plan_written
+      pointer = Math.min(pointer, 2); // back to right after plan_awaiting_approval
       continue;
     }
     if (entry.step === "needs_po_attention") {
@@ -240,16 +272,26 @@ function App({
   const [log, setLog] = useState<LogEntry[]>(() => readLog(repoRoot, meta.feature));
   const [subAgent, setSubAgent] = useState<SubAgent | null>(() => computeActiveAgent(readLog(repoRoot, meta.feature)));
   const [subLines, setSubLines] = useState<string[]>([]);
-  const [done, setDone] = useState<{ code: number } | null>(null);
+  const [done, setDone] = useState<{ code: number; rejected?: boolean } | null>(null);
+  const [awaitingApproval, setAwaitingApproval] = useState(false);
+  const [planPreview, setPlanPreview] = useState("");
   const childRef = useRef<ChildProcessByStdio<null, Readable, Readable> | null>(null);
   const tailRef = useRef(""); // carries a partial last line between chunks
 
-  useEffect(() => {
-    const plan = buildPmSessionPlan(repoRoot, meta, permissionMode, clickupRef);
+  /**
+   * Spawns one PM invocation for the given phase and wires up its output —
+   * shared between the initial mount and the second invocation fired after
+   * the PO approves the plan (see the "y" key handling in useInput below).
+   * Only "initial" can end in the approval prompt instead of "done": that's
+   * the only phase where PM is instructed to stop short of Dev.
+   */
+  function startPhase(phase: PmPhase) {
+    const plan = buildPmSessionPlan(repoRoot, meta, permissionMode, clickupRef, phase);
     plan.logFile.write(plan.notice);
 
     const child = spawnClaudeProcess(plan.args, plan.cwd);
     childRef.current = child;
+    tailRef.current = "";
 
     const onChunk = (chunk: Buffer) => {
       plan.logFile.write(chunk);
@@ -272,8 +314,29 @@ function App({
         setLines((prev) => prev.concat(tailRef.current));
         tailRef.current = "";
       }
-      setDone({ code: code ?? 0 });
+      const freshLog = readLog(repoRoot, meta.feature);
+      const reachedApprovalPoint =
+        phase === "initial" &&
+        (code ?? 0) === 0 &&
+        freshLog.some((e) => e.step === "plan_awaiting_approval") &&
+        !freshLog.some((e) => e.step === "dev_started");
+      if (reachedApprovalPoint) {
+        setPlanPreview(readPlanPreview(repoRoot, meta.feature));
+        setAwaitingApproval(true);
+      } else {
+        setDone({ code: code ?? 0 });
+      }
     });
+  }
+
+  useEffect(() => {
+    const resume = determineResumePhase(repoRoot, meta.feature);
+    if (resume === "awaitingApprovalResume") {
+      setPlanPreview(readPlanPreview(repoRoot, meta.feature));
+      setAwaitingApproval(true);
+    } else {
+      startPhase(resume);
+    }
 
     return () => {
       if (childRef.current && !childRef.current.killed) {
@@ -300,6 +363,17 @@ function App({
       childRef.current?.kill();
       onDone(130);
       exit();
+      return;
+    }
+    if (awaitingApproval) {
+      if (input === "y" || key.return) {
+        setAwaitingApproval(false);
+        setLines([]); // fresh transcript for the post-approval PM invocation
+        startPhase("continueAfterApproval");
+      } else if (input === "n") {
+        setAwaitingApproval(false);
+        setDone({ code: 2, rejected: true });
+      }
       return;
     }
     if (done && (input === "q" || key.return)) {
@@ -330,10 +404,11 @@ function App({
   // Narrow-terminal fallback prints one extra hint line below the panels,
   // so reserve a row for it or the layout would overflow the real terminal.
   const panelHeight = Math.max(5, rows - HEADER_ROWS - (showSubPanel ? 0 : 1));
-  const visibleRows = Math.max(1, panelHeight - PANEL_CHROME_ROWS - (done ? 1 : 0));
+  const visibleRows = Math.max(1, panelHeight - PANEL_CHROME_ROWS - (done || awaitingApproval ? 1 : 0));
 
   const checklist = computeChecklist(log);
   const subPanelTitle = subAgent ? AGENT_PANEL_TITLE[subAgent] : "SUB-AGENT (ยังไม่เริ่ม)";
+  const footerHint = awaitingApproval ? ", y/Enter อนุมัติ, n ยกเลิก" : done ? ", q/Enter ออก" : "";
 
   return (
     <Box flexDirection="column" width={columns} height={rows}>
@@ -341,7 +416,7 @@ function App({
         <Text bold>pmctl run — {meta.feature}</Text>
         <Text dimColor>
           {" "}
-          (branch={meta.branch}) — Ctrl+C ยกเลิก{done ? ", q/Enter ออก" : ""}
+          (branch={meta.branch}) — Ctrl+C ยกเลิก{footerHint}
         </Text>
       </Box>
       <Box marginTop={1} height={panelHeight}>
@@ -376,19 +451,42 @@ function App({
           marginLeft={1}
         >
           <Text bold dimColor>
-            PM SESSION (live)
+            {awaitingApproval ? "PLAN — รออนุมัติ" : "PM SESSION (live)"}
           </Text>
-          {lines.length === 0 && !done && <Text dimColor>(กำลังเริ่ม...)</Text>}
-          {wrapLines(lines, pmWidth - PANEL_INNER_PADDING)
-            .slice(-visibleRows)
-            .map((l, i) => (
-              <Text key={i} wrap="truncate-end">
-                {l}
+          {awaitingApproval ? (
+            <>
+              <Text bold color="yellow">
+                plan.md พร้อมแล้ว — กด y หรือ Enter เพื่ออนุมัติและสั่ง Dev ต่อ, n เพื่อยกเลิก (แก้ plan.md เองได้ แล้วรัน
+                pmctl run ใหม่เพื่อดูอีกรอบ)
               </Text>
-            ))}
-          {done && (
+              {wrapLines(splitLines(planPreview), pmWidth - PANEL_INNER_PADDING)
+                .slice(-(visibleRows - 2))
+                .map((l, i) => (
+                  <Text key={i} wrap="truncate-end">
+                    {l}
+                  </Text>
+                ))}
+            </>
+          ) : (
+            <>
+              {lines.length === 0 && !done && <Text dimColor>(กำลังเริ่ม...)</Text>}
+              {wrapLines(lines, pmWidth - PANEL_INNER_PADDING)
+                .slice(-visibleRows)
+                .map((l, i) => (
+                  <Text key={i} wrap="truncate-end">
+                    {l}
+                  </Text>
+                ))}
+            </>
+          )}
+          {done && !done.rejected && (
             <Text bold color={done.code === 0 ? "green" : "red"}>
               -- จบแล้ว (exit code {done.code}) --
+            </Text>
+          )}
+          {done && done.rejected && (
+            <Text bold color="red">
+              -- ยกเลิกแล้ว แก้ plan.md เองแล้วรัน pmctl run ใหม่เพื่อขอ approve อีกรอบ --
             </Text>
           )}
         </Box>

@@ -70,7 +70,9 @@ pmctl run add-dark-mode --clickup "https://app.clickup.com/t/9018044177/DSAG-218
 This will:
 
 1. Record the feature against your current branch (no new branch, no new worktree, no port reassignment — it's literally the directory you're standing in)
-2. Start a PM session (a `claude` subprocess with its own bash access, using your existing ClickUp connector) that follows `roles/pm.md`: fetch the ClickUp task itself and write `spec.md` → plan → write `plan.md` → dispatch Dev → dispatch Reviewer (code review, blocks on FAIL) → dispatch Tester (real e2e) → loop on failure → final summary
+2. Start a PM session (a `claude` subprocess with its own bash access, using your existing ClickUp connector) that follows `roles/pm.md`: fetch the ClickUp task itself and write `spec.md` → plan → write `plan.md` → **stop and wait for your approval** → dispatch Dev → dispatch Reviewer (code review, blocks on FAIL) → dispatch Tester (real e2e) → loop on failure → final summary
+
+PM never dispatches Dev without you explicitly approving the plan first — see the next section for how that approval works. (This gate only applies in the interactive terminal UI; the non-TTY/piped fallback has no way to show you anything to approve, so it runs straight through with no stopping point — see "Watching it work" below.)
 
 ### Running more than one feature at once
 
@@ -87,7 +89,9 @@ pmctl run add-dark-mode --clickup "..." --isolate
 
 When stdin/stdout are a real terminal, `pmctl run` itself opens a live Ink UI that fills the screen: a todo-style checklist against the PM→Dev→Reviewer→Tester pipeline on the left (polled once a second from the same log `pmctl log`/`status` read), PM's own raw session output next to it, and — on terminals ≥100 columns wide — a third panel that auto-switches to whichever sub-agent is currently active (Dev, Reviewer, or Tester), so you can actually read what PM told it to do and what it answered, instead of that exchange being buried unreadable inside PM's own output. On narrower terminals that third panel is dropped rather than cramming three unreadable columns in; widen the terminal to get it back. `Ctrl+C` kills the PM session and exits; once PM finishes, press `q` or `Enter` to close the UI (its exit code becomes `pmctl run`'s own exit code). There's no second terminal to open for this — you're already looking at it.
 
-When stdin/stdout aren't a real TTY (piped output, CI, `pmctl run` invoked from another script), it falls back to the old plain text streaming straight to stdout — Ink needs real terminal raw-mode support that isn't available there.
+PM's first invocation always stops after writing `plan.md`, never dispatching Dev in that same call — the middle panel switches to showing `plan.md`'s content with a prompt: press **`y` or Enter to approve** (this spawns a second PM invocation that picks up right at dispatching Dev, skipping the ClickUp fetch/plan steps since they're already done) or **`n` to reject** (exits; edit `plan.md` by hand and run `pmctl run <feature> --clickup ...` again on the same feature — it detects the existing plan and reopens the same approval prompt immediately, without re-fetching the spec or re-planning). If you rerun a feature where Dev was already dispatched at some point in an earlier attempt, pmctl treats the plan as already (implicitly) approved and continues straight from Dev rather than asking again.
+
+When stdin/stdout aren't a real TTY (piped output, CI, `pmctl run` invoked from another script), there's no screen to show the plan or a key to press, so this falls back to the old all-in-one behavior: plain text streaming straight to stdout, PM runs end-to-end with no approval gate at all. Keep agentic, unattended runs like this to low-stakes features, or review `plan.md` yourself through some other channel before it gets this far.
 
 You can still inspect progress from elsewhere at any point without interrupting PM, e.g. from another terminal or machine:
 

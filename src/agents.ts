@@ -92,17 +92,62 @@ export interface PmSessionPlan {
 }
 
 /**
- * Builds everything needed to spawn the PM session (args, cwd, a log file
+ * Which part of the pipeline this particular PM invocation should run.
+ * Each `claude -p` call is one-shot and can't pause mid-session for a human
+ * to answer, so the plan-approval gate (see src/runView.tsx) is built as
+ * two separate invocations rather than one that "waits":
+ *   - "initial": steps 0-1 only (fetch spec, write plan.md), then PM stops
+ *     and logs plan_awaiting_approval — never touches Dev in this call.
+ *   - "continueAfterApproval": spec.md/plan.md already exist and the PO has
+ *     approved; skip straight to step 2 (dispatch Dev) onward.
+ *   - "fullRunNoGate": the old all-in-one behavior, no stopping point at
+ *     all. Used for the non-interactive/headless fallback (spawnPmSession
+ *     below), since there's no terminal there for a human to approve with.
+ */
+export type PmPhase = "initial" | "continueAfterApproval" | "fullRunNoGate";
+
+function buildInitialPrompt(phase: PmPhase, clickupRef: string, vars: Record<string, string>): string {
+  if (phase === "continueAfterApproval") {
+    return (
+      `PHASE: continue-after-approval\n` +
+      `spec.md (${vars.SPEC_PATH}) และ plan.md (${vars.PLAN_PATH}) มีอยู่แล้วจากรอบก่อนหน้า และ PO อนุมัติ plan แล้ว ` +
+      `ข้ามขั้นตอน 0 และ 1 ไปเลย ไปเริ่มที่ขั้นตอน 2 (สั่ง Dev) ทันที ทำต่อจนจบทุกขั้นตอน ` +
+      `(สั่ง Dev -> สั่ง Reviewer -> สั่ง Tester -> วนแก้ถ้า fail -> สรุปจบ)`
+    );
+  }
+  const header = `ClickUp task ของ feature นี้คือ: ${clickupRef}\n`;
+  if (phase === "initial") {
+    return (
+      header +
+      `PHASE: initial\n` +
+      `ทำตามบทบาท PM ของคุณเฉพาะขั้นตอน 0-1 เท่านั้น ` +
+      `(ดึง spec จาก ClickUp เขียน spec.md -> วางแผน -> เขียน plan.md) ` +
+      `แล้วหยุดทันที รอ PO อนุมัติ ห้ามสั่ง Dev ในรอบนี้เด็ดขาด`
+    );
+  }
+  // fullRunNoGate
+  return (
+    header +
+    `PHASE: full-run-no-gate\n` +
+    `ทำตามบทบาท PM ของคุณให้ครบทุกขั้นตอน ` +
+    `(ดึง spec จาก ClickUp เขียน spec.md -> วางแผน -> เขียน plan.md -> สั่ง Dev -> สั่ง Reviewer -> สั่ง Tester -> วนแก้ถ้า fail -> สรุปจบ)`
+  );
+}
+
+/**
+ * Builds everything needed to spawn one PM invocation (args, cwd, a log file
  * stream, and the human-readable startup notice) without actually spawning
  * it. Shared by the plain headless path (spawnPmSession below) and the
  * interactive TUI path (src/runView.tsx), so both stay in sync on exactly
- * what gets passed to `claude`.
+ * what gets passed to `claude`. `phase` picks which part of the pipeline
+ * this particular call covers — see PmPhase above.
  */
 export function buildPmSessionPlan(
   repoRoot: string,
   meta: Meta,
   permissionMode: string,
-  clickupRef: string
+  clickupRef: string,
+  phase: PmPhase = "fullRunNoGate"
 ): PmSessionPlan {
   const vars = buildVars(repoRoot, meta);
   const pmRoleTemplate = fs.readFileSync(path.join(ROLES_DIR, "pm.md"), "utf8");
@@ -114,10 +159,7 @@ export function buildPmSessionPlan(
   // src/claudeSettings.ts for why this is a guess, not a verified fix.
   ensureClaudeBashAllowRule(meta.worktreePath);
 
-  const initialPrompt =
-    `ClickUp task ของ feature นี้คือ: ${clickupRef}\n` +
-    `ทำตามบทบาท PM ของคุณให้ครบทุกขั้นตอน ` +
-    `(ดึง spec จาก ClickUp เขียน spec.md -> วางแผน -> เขียน plan.md -> สั่ง Dev -> สั่ง Tester -> วนแก้ถ้า fail -> สรุปจบ)`;
+  const initialPrompt = buildInitialPrompt(phase, clickupRef, vars);
 
   const logFile = fs.createWriteStream(featureFile(repoRoot, meta.feature, "pmSession"), { flags: "a" });
 
