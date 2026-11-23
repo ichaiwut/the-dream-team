@@ -5,7 +5,6 @@ import type { Readable } from "node:stream";
 import { Meta } from "./worktree.js";
 import { readLog, LogEntry } from "./log.js";
 import { buildPmSessionPlan, spawnClaudeProcess } from "./agents.js";
-import { stepColor, actorBadge } from "./tui.js";
 
 const LOG_POLL_MS = 1000;
 const MAX_LINES = 2000;
@@ -14,8 +13,80 @@ const MAX_LINES = 2000;
 // margin line + each panel's own header line + its top/bottom border.
 const HEADER_ROWS = 2;
 const PANEL_CHROME_ROWS = 3;
-const STATUS_WIDTH_RATIO = 0.3;
-const MIN_STATUS_WIDTH = 28;
+const CHECKLIST_WIDTH_RATIO = 0.28;
+const MIN_CHECKLIST_WIDTH = 30;
+
+// The canonical PO->PM->Dev->Tester pipeline, in order, as roles/pm.md
+// instructs PM to log it (log.ts' step field). Used to render a todo-style
+// checklist instead of a raw dump of log lines.
+const PIPELINE: { id: string; label: string }[] = [
+  { id: "spec_fetched", label: "ดึง spec จาก ClickUp" },
+  { id: "plan_written", label: "วางแผน (plan.md)" },
+  { id: "dev_started", label: "สั่ง Dev" },
+  { id: "dev_done", label: "Dev ทำงานเสร็จ" },
+  { id: "tester_started", label: "สั่ง Tester (e2e)" },
+  { id: "tester_done", label: "Tester ตรวจสอบเสร็จ" },
+  { id: "final_done", label: "จบงาน" },
+];
+
+interface ChecklistItem {
+  id: string;
+  label: string;
+  status: "done" | "current" | "pending";
+}
+
+interface Checklist {
+  items: ChecklistItem[];
+  iterationCount: number;
+  needsAttention: boolean;
+}
+
+/**
+ * Turns the append-only log into a todo-style checklist against the fixed
+ * pipeline above. Since Dev/Tester can be looped back into on a test
+ * failure ("iteration" in roles/pm.md's step 4), the pointer rolls back to
+ * just after plan_written on every iteration, so mid-loop the checklist
+ * correctly shows Dev/Tester as pending again rather than staying "done"
+ * from an earlier failed round.
+ */
+function computeChecklist(log: LogEntry[]): Checklist {
+  let pointer = -1;
+  let iterationCount = 0;
+  let needsAttention = false;
+
+  for (const entry of log) {
+    if (entry.step === "iteration") {
+      iterationCount++;
+      pointer = Math.min(pointer, 1); // back to right after plan_written
+      continue;
+    }
+    if (entry.step === "needs_po_attention") {
+      needsAttention = true;
+      continue;
+    }
+    const idx = PIPELINE.findIndex((p) => p.id === entry.step);
+    if (idx !== -1 && idx > pointer) pointer = idx;
+  }
+
+  const items: ChecklistItem[] = PIPELINE.map((p, i) => ({
+    ...p,
+    status: i < pointer ? "done" : i === pointer ? (i === PIPELINE.length - 1 ? "done" : "current") : "pending",
+  }));
+
+  return { items, iterationCount, needsAttention };
+}
+
+function checklistColor(status: ChecklistItem["status"]): string | undefined {
+  if (status === "done") return "green";
+  if (status === "current") return "yellow";
+  return undefined;
+}
+
+function checklistMark(status: ChecklistItem["status"]): string {
+  if (status === "done") return "☑";
+  if (status === "current") return "▶";
+  return "☐";
+}
 
 function splitLines(text: string): string[] {
   return text.split(/\r?\n/);
@@ -122,10 +193,12 @@ function App({
   // Fill the real terminal: compute panel widths/heights from the current
   // columns/rows instead of hardcoding them, and recompute whenever the
   // terminal is resized (useTerminalSize above).
-  const statusWidth = Math.max(MIN_STATUS_WIDTH, Math.floor(columns * STATUS_WIDTH_RATIO));
-  const pmWidth = Math.max(40, columns - statusWidth - 3); // 3 = gap + borders between panels
+  const checklistWidth = Math.max(MIN_CHECKLIST_WIDTH, Math.floor(columns * CHECKLIST_WIDTH_RATIO));
+  const pmWidth = Math.max(40, columns - checklistWidth - 3); // 3 = gap + borders between panels
   const panelHeight = Math.max(5, rows - HEADER_ROWS);
   const visibleRows = Math.max(1, panelHeight - PANEL_CHROME_ROWS - (done ? 1 : 0));
+
+  const checklist = computeChecklist(log);
 
   return (
     <Box flexDirection="column" width={columns} height={rows}>
@@ -137,9 +210,35 @@ function App({
         </Text>
       </Box>
       <Box marginTop={1} height={panelHeight}>
-        <Box flexDirection="column" width={pmWidth} height={panelHeight} borderStyle="single" paddingX={1}>
+        <Box flexDirection="column" width={checklistWidth} height={panelHeight} borderStyle="single" paddingX={1}>
           <Text bold dimColor>
-            PM SESSION (live) — agent ที่กำลังทำงานตอนนี้ดูได้ที่ STATUS ด้านขวา
+            TODO (PM → Dev → Tester)
+          </Text>
+          {checklist.items.map((item) => (
+            <Text key={item.id} color={checklistColor(item.status)} bold={item.status === "current"}>
+              {checklistMark(item.status)} {item.label}
+            </Text>
+          ))}
+          {checklist.iterationCount > 0 && (
+            <Text color="yellow">↻ วนแก้แล้ว {checklist.iterationCount} รอบ</Text>
+          )}
+          {checklist.needsAttention && (
+            <Text bold color="red">
+              ⚠ ต้องการให้ PO ตัดสินใจ — ดูคำตอบสุดท้ายของ PM
+            </Text>
+          )}
+        </Box>
+
+        <Box
+          flexDirection="column"
+          width={pmWidth}
+          height={panelHeight}
+          borderStyle="single"
+          paddingX={1}
+          marginLeft={1}
+        >
+          <Text bold dimColor>
+            PM SESSION (live)
           </Text>
           {lines.length === 0 && !done && <Text dimColor>(กำลังเริ่ม...)</Text>}
           {lines.slice(-visibleRows).map((l, i) => (
@@ -153,27 +252,6 @@ function App({
             </Text>
           )}
         </Box>
-
-        <Box
-          flexDirection="column"
-          width={statusWidth}
-          height={panelHeight}
-          borderStyle="single"
-          paddingX={1}
-          marginLeft={1}
-        >
-          <Text bold dimColor>
-            STATUS (PM/Dev/Tester)
-          </Text>
-          {log.length === 0 && <Text dimColor>(ยังไม่มี log)</Text>}
-          {log.slice(-Math.max(1, panelHeight - PANEL_CHROME_ROWS)).map((entry, i) => (
-            <Text key={i} wrap="truncate-end">
-              <Text color={stepColor(entry.step)}>
-                [{actorBadge(entry.actor)}] {entry.step}
-              </Text>
-            </Text>
-          ))}
-        </Box>
       </Box>
     </Box>
   );
@@ -181,9 +259,9 @@ function App({
 
 /**
  * Interactive, single-screen alternative to running `pmctl run` and
- * `pmctl watch` in two separate terminals: renders the PM session's live
- * output next to this feature's step log, in one Ink UI that fills the
- * real terminal and follows it on resize. Falls back to spawnPmSession
+ * `pmctl watch` in two separate terminals: renders a PM→Dev→Tester todo
+ * checklist next to the PM session's live output, in one Ink UI that fills
+ * the real terminal and follows it on resize. Falls back to spawnPmSession
  * (plain stdout streaming) when stdin/stdout aren't a real TTY — see
  * src/cli.ts.
  */
