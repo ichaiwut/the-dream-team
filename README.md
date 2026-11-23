@@ -8,7 +8,7 @@ Giving one agent full autonomy over a feature — writing the code, testing it, 
 
 - **PO** (you) — owns the spec in ClickUp and signs off on acceptance testing. Never talks to Dev or Tester directly.
 - **PM** (agent) — reads the spec, writes a plan before any code is touched, dispatches Dev and Tester, and is the only role that talks to either of them.
-- **Dev** (agent) — implements against PM's instructions inside an isolated git worktree. Has no path to reach the PO.
+- **Dev** (agent) — implements against PM's instructions in the working copy PM dispatched it to (your current checkout by default, or an isolated git worktree with `--isolate`). Has no path to reach the PO.
 - **Tester** (agent) — independently verifies Dev's work by actually running tests (unit, then real e2e), not by reading the diff and approving it.
 
 ## Design rules this tool enforces
@@ -54,28 +54,31 @@ Also double-check `src/clickupTools.ts` against your connector's actual current 
 
 ## Usage
 
-`pmctl` does not create or delete branches itself — that stays the PO's call. Create the branch yourself first:
+`pmctl` never creates or deletes branches itself — that stays the PO's call. By default it also doesn't create a worktree: it runs PM/Dev/Tester directly in whatever branch you already have checked out.
 
 ```bash
 cd your-backend-repo
-git branch feature/add-dark-mode   # or: git checkout -b feature/add-dark-mode
+git checkout -b add-dark-mode   # or just stay on whatever branch you're already on
 pmctl run add-dark-mode --clickup "https://app.clickup.com/t/9018044177/DSAG-218"
 ```
 
 `--clickup` takes either a full ClickUp task URL (custom IDs like `DSAG-218` included — just paste the URL as it appears in your browser) or a bare task id.
 
-By default `pmctl run <feature>` expects a branch named `feature/<feature>` to already exist. Use a different name with `--branch <name>` (the branch still must already exist — pass this instead of renaming your feature to match a branch you already have):
-
-```bash
-pmctl run add-dark-mode --clickup "..." --branch chore/dark-mode-toggle
-```
-
-If the branch doesn't exist yet, `pmctl run` fails immediately with a clear error instead of creating one for you.
-
 This will:
 
-1. Create a new git worktree (`../your-backend-repo-add-dark-mode`) checked out to that existing branch, with an auto-assigned dev server port
+1. Record the feature against your current branch (no new branch, no new worktree, no port reassignment — it's literally the directory you're standing in)
 2. Start a PM session (a `claude` subprocess with its own bash access, using your existing ClickUp connector) that follows `roles/pm.md`: fetch the ClickUp task itself and write `spec.md` → plan → write `plan.md` → dispatch Dev → dispatch Tester (real e2e) → loop on failure → final summary
+
+### Running more than one feature at once
+
+If you want two features worked on in parallel without them colliding on files or dev-server ports, pass `--isolate`. This is the only case where `pmctl` touches git worktrees — and even then, it still won't create the branch for you:
+
+```bash
+git branch feature/add-dark-mode   # create it yourself first
+pmctl run add-dark-mode --clickup "..." --isolate
+```
+
+`--isolate` expects a branch named `feature/<feature>` to already exist (override the name with `--branch <name>`), creates a separate git worktree (`../your-backend-repo-add-dark-mode`) checked out to it, and assigns it its own dev server port. If the branch doesn't exist, `pmctl run --isolate` fails immediately with a clear error instead of creating one for you.
 
 You can inspect progress at any point without interrupting PM:
 
@@ -99,10 +102,10 @@ pmctl refresh-spec add-dark-mode --clickup "https://app.clickup.com/t/9018044177
 
 (this spawns a short one-off `claude` call that re-fetches via the connector and overwrites `spec.md`, same write-blocklist applied)
 
-Once merged, clean up the worktree:
+Once merged, clean up:
 
 ```bash
-pmctl clean add-dark-mode    # removes the worktree; .pmctl/<feature>/ (log, plan, report) is kept
+pmctl clean add-dark-mode    # removes the worktree (--isolate runs only); .pmctl/<feature>/ (log, plan, report) is kept
 ```
 
 ## Files produced per feature

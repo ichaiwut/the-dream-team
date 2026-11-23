@@ -51,17 +51,14 @@ function branchExists(repoRoot: string, branch: string): boolean {
   }
 }
 
-export function createWorktree(
-  repoRoot: string,
-  feature: string,
-  clickupTaskId?: string,
-  branchOverride?: string,
-): Meta {
-  const repoName = path.basename(repoRoot);
-  const worktreePath = path.join(path.dirname(repoRoot), `${repoName}-${feature}`);
-  const branch = branchOverride ?? `feature/${feature}`;
-  const port = nextFreePort(repoRoot);
+function currentBranch(repoRoot: string): string {
+  return execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  }).trim();
+}
 
+function assertFeatureFree(repoRoot: string, feature: string): string {
   const metaPath = featureFile(repoRoot, feature, "meta");
   if (fs.existsSync(metaPath)) {
     throw new Error(
@@ -69,10 +66,57 @@ export function createWorktree(
         `หรือถ้าจะเริ่มงานใหม่ให้ใช้ชื่อ feature อื่น`,
     );
   }
+  return metaPath;
+}
 
-  // pmctl does not create or delete branches itself — that's the PO's call.
-  // The branch must already exist (created by hand, e.g. `git branch ${branch}`
-  // or `git checkout -b ${branch}`) before `pmctl run` is used.
+function writeMeta(repoRoot: string, feature: string, meta: Meta): Meta {
+  ensureFeatureDir(repoRoot, feature);
+  fs.writeFileSync(featureFile(repoRoot, feature, "meta"), JSON.stringify(meta, null, 2));
+  return meta;
+}
+
+/**
+ * Default mode: no new branch, no new worktree. Runs PM/Dev/Tester directly
+ * in repoRoot, on whatever branch is already checked out there. This is the
+ * right choice for solo/sequential work where isolation between features
+ * doesn't matter and the PO doesn't want pmctl touching git branches at all.
+ */
+export function useCurrentCheckout(repoRoot: string, feature: string, clickupTaskId?: string): Meta {
+  assertFeatureFree(repoRoot, feature);
+  const branch = currentBranch(repoRoot);
+  const meta: Meta = {
+    feature,
+    branch,
+    worktreePath: repoRoot,
+    port: nextFreePort(repoRoot),
+    clickupTaskId,
+    createdAt: new Date().toISOString(),
+  };
+  // Deliberately does not touch .env.local here — repoRoot is the user's own
+  // working copy, possibly already running a dev server on their own port.
+  return writeMeta(repoRoot, feature, meta);
+}
+
+/**
+ * Opt-in isolated mode: creates a separate git worktree (and so a separate
+ * working directory + dev server port) for this feature, checked out onto an
+ * existing branch. pmctl still does not create or delete the branch itself —
+ * that stays the PO's call — it only fails clearly if the branch is missing.
+ * Use this when running more than one feature at a time and you need them to
+ * not collide on files or ports.
+ */
+export function createIsolatedWorktree(
+  repoRoot: string,
+  feature: string,
+  clickupTaskId?: string,
+  branchOverride?: string,
+): Meta {
+  assertFeatureFree(repoRoot, feature);
+  const repoName = path.basename(repoRoot);
+  const worktreePath = path.join(path.dirname(repoRoot), `${repoName}-${feature}`);
+  const branch = branchOverride ?? `feature/${feature}`;
+  const port = nextFreePort(repoRoot);
+
   if (!branchExists(repoRoot, branch)) {
     throw new Error(
       `ไม่พบ branch "${branch}" — pmctl ไม่สร้าง branch ให้เองแล้ว กรุณาสร้างเองก่อน เช่น "git branch ${branch}" ` +
@@ -103,7 +147,6 @@ export function createWorktree(
 
   fs.writeFileSync(path.join(worktreePath, ".env.local"), `PORT=${port}\n`);
 
-  ensureFeatureDir(repoRoot, feature);
   const meta: Meta = {
     feature,
     branch,
@@ -112,8 +155,7 @@ export function createWorktree(
     clickupTaskId,
     createdAt: new Date().toISOString(),
   };
-  fs.writeFileSync(featureFile(repoRoot, feature, "meta"), JSON.stringify(meta, null, 2));
-  return meta;
+  return writeMeta(repoRoot, feature, meta);
 }
 
 export function loadMeta(repoRoot: string, feature: string): Meta {
@@ -126,6 +168,14 @@ export function loadMeta(repoRoot: string, feature: string): Meta {
 
 export function removeWorktree(repoRoot: string, feature: string): void {
   const meta = loadMeta(repoRoot, feature);
+  if (path.resolve(meta.worktreePath) === path.resolve(repoRoot)) {
+    // This feature ran in-place (useCurrentCheckout) — there's no separate
+    // worktree to remove, and the directory IS the repo the user is standing
+    // in, so there's nothing to do here beyond what `clean` already does for
+    // .pmctl/<feature> state.
+    console.log(`[pmctl] feature "${feature}" รันแบบ in-place ไม่มี worktree แยกให้ลบ`);
+    return;
+  }
   execFileSync("git", ["worktree", "remove", meta.worktreePath, "--force"], {
     cwd: repoRoot,
     stdio: "inherit",

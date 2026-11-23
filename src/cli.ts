@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import fs from "node:fs";
-import { createWorktree, loadMeta, removeWorktree } from "./worktree.js";
+import { createIsolatedWorktree, loadMeta, removeWorktree, useCurrentCheckout } from "./worktree.js";
 import { appendLog, formatLog, readLog } from "./log.js";
 import { featureFile, stateRoot } from "./paths.js";
 import { spawnPmSession, spawnRefreshSpec } from "./agents.js";
@@ -20,27 +20,42 @@ program
 program
   .command("run <feature>")
   .description(
-    "สร้าง worktree จาก branch ที่คุณสร้างไว้แล้ว แล้วเริ่ม PM session (PM จะดึง spec จาก ClickUp เองผ่าน connector ของคุณ)",
+    "เริ่ม PM session สำหรับ feature นี้ (ค่าเริ่มต้นทำงานตรงใน branch ปัจจุบันของคุณ ไม่สร้าง branch/worktree ใหม่)",
   )
   .requiredOption("--clickup <ref>", "ClickUp task id หรือวาง URL เต็มก็ได้ (เช่น https://app.clickup.com/t/9018044177/DSAG-218)")
   .option(
+    "--isolate",
+    "สร้าง git worktree แยกต่างหากแทนการทำงานในที่เดิม (ต้องมี branch ที่ตั้งใจใช้อยู่แล้ว pmctl จะไม่สร้างให้)",
+  )
+  .option(
     "--branch <name>",
-    "ชื่อ branch ที่สร้างไว้ล่วงหน้าแล้ว (ต้องมีอยู่จริง pmctl จะไม่สร้างให้) ค่าเริ่มต้นคือ feature/<feature>",
+    "ใช้กับ --isolate เท่านั้น: ชื่อ branch ที่สร้างไว้ล่วงหน้าแล้ว ค่าเริ่มต้นคือ feature/<feature>",
   )
   .option("--permission-mode <mode>", "permission mode ที่ส่งให้ PM session", "acceptEdits")
-  .action(async (feature: string, opts: { clickup: string; branch?: string; permissionMode: string }) => {
-    console.log(`[pmctl] สร้าง worktree สำหรับ feature "${feature}"...`);
-    const meta = createWorktree(repoRoot, feature, opts.clickup, opts.branch);
+  .action(
+    async (
+      feature: string,
+      opts: { clickup: string; isolate?: boolean; branch?: string; permissionMode: string },
+    ) => {
+      let meta;
+      if (opts.isolate) {
+        console.log(`[pmctl] สร้าง worktree แยกสำหรับ feature "${feature}"...`);
+        meta = createIsolatedWorktree(repoRoot, feature, opts.clickup, opts.branch);
+      } else {
+        console.log(`[pmctl] เริ่ม feature "${feature}" ใน branch ปัจจุบัน (ไม่สร้าง worktree ใหม่)...`);
+        meta = useCurrentCheckout(repoRoot, feature, opts.clickup);
+      }
 
-    appendLog(repoRoot, feature, {
-      actor: "system",
-      step: "feature_created",
-      reason: `pmctl run เริ่มงานใหม่จาก ClickUp task ${opts.clickup}`,
-      result: `worktree=${meta.worktreePath} port=${meta.port}`,
-    });
+      appendLog(repoRoot, feature, {
+        actor: "system",
+        step: "feature_created",
+        reason: `pmctl run เริ่มงานใหม่จาก ClickUp task ${opts.clickup}`,
+        result: `worktree=${meta.worktreePath} port=${meta.port}`,
+      });
 
-    await spawnPmSession(repoRoot, meta, opts.permissionMode, opts.clickup);
-  });
+      await spawnPmSession(repoRoot, meta, opts.permissionMode, opts.clickup);
+    },
+  );
 
 program
   .command("refresh-spec <feature>")
