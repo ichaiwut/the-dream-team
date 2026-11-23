@@ -54,16 +54,27 @@ Also double-check `src/clickupTools.ts` against your connector's actual current 
 
 ## Usage
 
+`pmctl` does not create or delete branches itself — that stays the PO's call. Create the branch yourself first:
+
 ```bash
 cd your-backend-repo
+git branch feature/add-dark-mode   # or: git checkout -b feature/add-dark-mode
 pmctl run add-dark-mode --clickup "https://app.clickup.com/t/9018044177/DSAG-218"
 ```
 
 `--clickup` takes either a full ClickUp task URL (custom IDs like `DSAG-218` included — just paste the URL as it appears in your browser) or a bare task id.
 
+By default `pmctl run <feature>` expects a branch named `feature/<feature>` to already exist. Use a different name with `--branch <name>` (the branch still must already exist — pass this instead of renaming your feature to match a branch you already have):
+
+```bash
+pmctl run add-dark-mode --clickup "..." --branch chore/dark-mode-toggle
+```
+
+If the branch doesn't exist yet, `pmctl run` fails immediately with a clear error instead of creating one for you.
+
 This will:
 
-1. Create a new git worktree (`../your-backend-repo-add-dark-mode`) on branch `feature/add-dark-mode`, with an auto-assigned dev server port
+1. Create a new git worktree (`../your-backend-repo-add-dark-mode`) checked out to that existing branch, with an auto-assigned dev server port
 2. Start a PM session (a `claude` subprocess with its own bash access, using your existing ClickUp connector) that follows `roles/pm.md`: fetch the ClickUp task itself and write `spec.md` → plan → write `plan.md` → dispatch Dev → dispatch Tester (real e2e) → loop on failure → final summary
 
 You can inspect progress at any point without interrupting PM:

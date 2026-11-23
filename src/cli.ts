@@ -19,12 +19,18 @@ program
 
 program
   .command("run <feature>")
-  .description("สร้าง worktree ใหม่ แล้วเริ่ม PM session (PM จะดึง spec จาก ClickUp เองผ่าน connector ของคุณ)")
+  .description(
+    "สร้าง worktree จาก branch ที่คุณสร้างไว้แล้ว แล้วเริ่ม PM session (PM จะดึง spec จาก ClickUp เองผ่าน connector ของคุณ)",
+  )
   .requiredOption("--clickup <ref>", "ClickUp task id หรือวาง URL เต็มก็ได้ (เช่น https://app.clickup.com/t/9018044177/DSAG-218)")
+  .option(
+    "--branch <name>",
+    "ชื่อ branch ที่สร้างไว้ล่วงหน้าแล้ว (ต้องมีอยู่จริง pmctl จะไม่สร้างให้) ค่าเริ่มต้นคือ feature/<feature>",
+  )
   .option("--permission-mode <mode>", "permission mode ที่ส่งให้ PM session", "acceptEdits")
-  .action(async (feature: string, opts: { clickup: string; permissionMode: string }) => {
+  .action(async (feature: string, opts: { clickup: string; branch?: string; permissionMode: string }) => {
     console.log(`[pmctl] สร้าง worktree สำหรับ feature "${feature}"...`);
-    const meta = createWorktree(repoRoot, feature, opts.clickup);
+    const meta = createWorktree(repoRoot, feature, opts.clickup, opts.branch);
 
     appendLog(repoRoot, feature, {
       actor: "system",

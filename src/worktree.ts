@@ -51,10 +51,15 @@ function branchExists(repoRoot: string, branch: string): boolean {
   }
 }
 
-export function createWorktree(repoRoot: string, feature: string, clickupTaskId?: string): Meta {
+export function createWorktree(
+  repoRoot: string,
+  feature: string,
+  clickupTaskId?: string,
+  branchOverride?: string,
+): Meta {
   const repoName = path.basename(repoRoot);
   const worktreePath = path.join(path.dirname(repoRoot), `${repoName}-${feature}`);
-  const branch = `feature/${feature}`;
+  const branch = branchOverride ?? `feature/${feature}`;
   const port = nextFreePort(repoRoot);
 
   const metaPath = featureFile(repoRoot, feature, "meta");
@@ -65,20 +70,22 @@ export function createWorktree(repoRoot: string, feature: string, clickupTaskId?
     );
   }
 
-  if (branchExists(repoRoot, branch)) {
-    // No meta.json for this feature, so this branch is a leftover from a previous
-    // run that failed partway (e.g. before a worktree was ever created) — it's
-    // safe for pmctl to reclaim it rather than making the user delete it by hand.
-    console.log(
-      `[pmctl] branch "${branch}" มีอยู่แล้วแต่ไม่มี feature state ที่ตรงกัน (น่าจะค้างจากรันครั้งก่อนที่ไม่สำเร็จ) — ลบแล้วสร้างใหม่ให้`,
+  // pmctl does not create or delete branches itself — that's the PO's call.
+  // The branch must already exist (created by hand, e.g. `git branch ${branch}`
+  // or `git checkout -b ${branch}`) before `pmctl run` is used.
+  if (!branchExists(repoRoot, branch)) {
+    throw new Error(
+      `ไม่พบ branch "${branch}" — pmctl ไม่สร้าง branch ให้เองแล้ว กรุณาสร้างเองก่อน เช่น "git branch ${branch}" ` +
+        `(หรือถ้าอยากใช้ branch ชื่ออื่น ใช้ --branch <ชื่อ> ตอนรัน pmctl run)`,
     );
-    execFileSync("git", ["branch", "-D", branch], { cwd: repoRoot, stdio: "inherit" });
   }
 
   if (fs.existsSync(worktreePath)) {
-    // Likewise a leftover worktree directory from a previous failed run. Try to
-    // let git clean it up properly first (in case it's still registered), then
-    // fall back to a plain filesystem removal.
+    // A leftover worktree directory from a previous incomplete run. This is
+    // pmctl's own working-copy folder, not the user's branch, so it's safe to
+    // clean up automatically — unlike the branch itself. Try to let git clean
+    // it up properly first (in case it's still registered), then fall back to
+    // a plain filesystem removal.
     try {
       execFileSync("git", ["worktree", "remove", worktreePath, "--force"], {
         cwd: repoRoot,
@@ -89,7 +96,7 @@ export function createWorktree(repoRoot: string, feature: string, clickupTaskId?
     }
   }
 
-  execFileSync("git", ["worktree", "add", worktreePath, "-b", branch], {
+  execFileSync("git", ["worktree", "add", worktreePath, branch], {
     cwd: repoRoot,
     stdio: "inherit",
   });
