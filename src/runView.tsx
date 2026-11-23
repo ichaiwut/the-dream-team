@@ -16,6 +16,27 @@ import { buildPlanHtml, openInBrowser } from "./planHtml.js";
 const LOG_POLL_MS = 1000;
 const MAX_LINES = 2000;
 
+// Anthropic's API occasionally returns a transient server-side error (529
+// overloaded is the common one, but rate limits and 5xx gateway errors show
+// up the same way) that has nothing to do with PM's own work — the fix is
+// just "try again shortly," not stopping the whole `pmctl run` and making
+// the PO re-run it by hand. Matched against this invocation's own raw
+// stdout/stderr text when it exits non-zero.
+const TRANSIENT_ERROR_PATTERNS = [
+  /\b529\b/,
+  /overloaded/i,
+  /\b50[0-4]\b.*(error|gateway)/i,
+  /rate.?limit/i,
+  /ECONNRESET/,
+  /ETIMEDOUT/,
+  /socket hang up/i,
+];
+function isTransientError(text: string): boolean {
+  return TRANSIENT_ERROR_PATTERNS.some((re) => re.test(text));
+}
+const MAX_TRANSIENT_RETRIES = 5;
+const RETRY_DELAYS_MS = [5000, 15000, 30000, 60000, 60000];
+
 // Rows the chrome around the panels takes up: title line + its blank
 // margin line + each panel's own header line + its top/bottom border.
 const HEADER_ROWS = 2;
@@ -221,6 +242,14 @@ function App({
   const [planHtmlPath, setPlanHtmlPath] = useState("");
   const childRef = useRef<ChildProcessByStdio<null, Readable, Readable> | null>(null);
   const tailRef = useRef(""); // carries a partial last line between chunks
+  const retryTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  function clearPendingRetry() {
+    if (retryTimeoutRef.current) {
+      clearTimeout(retryTimeoutRef.current);
+      retryTimeoutRef.current = null;
+    }
+  }
 
   /**
    * Spawns one PM invocation for the given phase and wires up its output —
@@ -262,16 +291,18 @@ function App({
     setAwaitingApproval(true);
   }
 
-  function startPhase(phase: PmPhase) {
+  function startPhase(phase: PmPhase, attempt: number = 1) {
     const plan = buildPmSessionPlan(repoRoot, meta, permissionMode, clickupRef, phase);
     plan.logFile.write(plan.notice);
 
     const child = spawnClaudeProcess(plan.args, plan.cwd);
     childRef.current = child;
     tailRef.current = "";
+    let rawOutput = ""; // this invocation's own text only, to check for a transient-error pattern
 
     const onChunk = (chunk: Buffer) => {
       plan.logFile.write(chunk);
+      rawOutput += chunk.toString("utf8");
       const text = tailRef.current + chunk.toString("utf8");
       const parts = splitLines(text);
       tailRef.current = parts.pop() ?? "";
@@ -291,16 +322,33 @@ function App({
         setLines((prev) => prev.concat(tailRef.current));
         tailRef.current = "";
       }
+      const exitCode = code ?? 0;
+
+      if (exitCode !== 0 && isTransientError(rawOutput) && attempt < MAX_TRANSIENT_RETRIES) {
+        const delayMs = RETRY_DELAYS_MS[Math.min(attempt - 1, RETRY_DELAYS_MS.length - 1)];
+        setLines((prev) =>
+          prev.concat(
+            "",
+            `⏳ เจอ error ฝั่ง API ชั่วคราว (เช่น 529 overloaded) ไม่ใช่ปัญหาจาก plan/PM — จะลองใหม่อัตโนมัติใน ${Math.round(delayMs / 1000)} วิ (รอบ ${attempt + 1}/${MAX_TRANSIENT_RETRIES})`
+          )
+        );
+        retryTimeoutRef.current = setTimeout(() => {
+          retryTimeoutRef.current = null;
+          startPhase(phase, attempt + 1);
+        }, delayMs);
+        return;
+      }
+
       const freshLog = readLog(repoRoot, meta.feature);
       const reachedApprovalPoint =
         phase === "initial" &&
-        (code ?? 0) === 0 &&
+        exitCode === 0 &&
         freshLog.some((e) => e.step === "plan_awaiting_approval") &&
         !freshLog.some((e) => e.step === "dev_started");
       if (reachedApprovalPoint) {
         showApprovalScreen(freshLog);
       } else {
-        setDone({ code: code ?? 0 });
+        setDone({ code: exitCode });
       }
     });
   }
@@ -314,6 +362,7 @@ function App({
     }
 
     return () => {
+      clearPendingRetry();
       if (childRef.current && !childRef.current.killed) {
         childRef.current.kill();
       }
@@ -347,6 +396,7 @@ function App({
 
   useInput((input, key) => {
     if (key.ctrl && input === "c") {
+      clearPendingRetry();
       childRef.current?.kill();
       onDone(130);
       exit();
