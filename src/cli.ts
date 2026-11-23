@@ -8,6 +8,7 @@ import { appendLog, formatLog, readLog } from "./log.js";
 import { featureDir, featureFile, stateRoot } from "./paths.js";
 import { spawnPmSession } from "./agents.js";
 import { watchFeatures } from "./watch.js";
+import { runTui } from "./tui.js";
 
 const repoRoot = process.cwd();
 const program = new Command();
@@ -105,10 +106,18 @@ program
 
 program
   .command("watch")
-  .description("เปิดหน้าจอ live refresh ดูทุก feature + agent ตัวไหนกำลังทำอะไรอยู่ (เปิดอีก terminal คู่กับ pmctl run ได้)")
-  .option("--interval <ms>", "ความถี่ในการ refresh (ms)", "1500")
-  .action((opts: { interval: string }) => {
-    watchFeatures(repoRoot, Number(opts.interval));
+  .description("เปิด TUI แบบ interactive ดูทุก feature + agent ตัวไหนกำลังทำอะไรอยู่ (เปิดอีก terminal คู่กับ pmctl run ได้)")
+  .option("--interval <ms>", "ความถี่ในการ refresh สำหรับโหมด non-interactive (ms)", "1500")
+  .option("--plain", "บังคับใช้โหมด non-interactive (plain polling) แม้มี TTY ก็ตาม")
+  .action((opts: { interval: string; plain?: boolean }) => {
+    const isInteractive = process.stdin.isTTY && process.stdout.isTTY && !opts.plain;
+    if (isInteractive) {
+      runTui(repoRoot);
+    } else {
+      // ไม่มี TTY จริง (เช่นรันผ่าน pipe/CI) — ใช้โหมด plain เพราะ Ink
+      // ต้องการ raw-mode stdin ซึ่งใช้ไม่ได้ในสภาพแวดล้อมแบบนั้น
+      watchFeatures(repoRoot, Number(opts.interval));
+    }
   });
 
 program

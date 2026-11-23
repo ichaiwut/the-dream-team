@@ -75,7 +75,9 @@ pmctl report add-dark-mode   # Tester's report.md
 pmctl watch                  # live-refreshing view of every feature and which agent is doing what, right now
 ```
 
-`pmctl watch` is meant to run in a second terminal alongside `pmctl run` — it polls the same `log.ndjson` files on an interval (default 1.5s) and redraws a small dashboard: current step per feature, color-coded, with the last couple of entries as trailing context. It's not a full TUI like saaio's — no panes, no keyboard navigation — just enough to answer "what is each agent doing right now" without tailing raw PM output or reading files by hand.
+`pmctl watch` is meant to run in a second terminal alongside `pmctl run`. When stdin/stdout are a real terminal, it's an interactive TUI (built with [Ink](https://github.com/vadimdemedes/ink)): a feature list on the left (↑/↓ to select, `q` to quit) and that feature's live log on the right, color-coded by step. It polls the same `log.ndjson` files `pmctl log`/`status` read — no separate state, no extra process to keep in sync.
+
+When stdin/stdout aren't a TTY (piped output, CI, this tool running inside another script), it automatically falls back to a plain, non-interactive dashboard that just redraws on an interval — Ink needs real terminal raw-mode support that isn't available there. Force the plain mode yourself with `pmctl watch --plain`.
 
 If the ClickUp task changes after the feature has started:
 
