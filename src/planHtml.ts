@@ -28,6 +28,38 @@ export function hasOpenQuestions(markdown: string): boolean {
   return OPEN_QUESTIONS_HEADING_RE.test(markdown);
 }
 
+/**
+ * A "คำถามถึง PM" / "questions to PM" heading still sitting in a document
+ * the PO is being shown.
+ *
+ * Dev, Reviewer and Tester address their questions to PM, and roles/pm.md
+ * requires PM to triage them — answer what it can from the spec, plan and
+ * code, record those under "การตัดสินใจของ PM", and leave only genuine
+ * product decisions for the PO. An instruction to a model isn't a
+ * guarantee, so when one of these headings survives all the way to a gate
+ * it means PM passed a question through instead of deciding it. Worth
+ * saying out loud: the PO delegated that decision on purpose.
+ */
+const PM_QUESTIONS_HEADING_RE = /^#{1,6}.*(คำถามถึง\s*PM|questions?\s*(to|for)\s*PM)/im;
+
+export function hasUnresolvedAgentQuestions(markdown: string): boolean {
+  const match = PM_QUESTIONS_HEADING_RE.exec(markdown);
+  if (!match) return false;
+  // "ไม่มี" ("none") under the heading is exactly what the role templates
+  // ask for when an agent had nothing to ask, so it means the opposite of
+  // an unanswered question. Read the body after the heading itself — not
+  // via split(), whose output is reshaped by this pattern's capture
+  // groups.
+  const body = markdown.slice(match.index + match[0].length);
+  const firstLines = body
+    .split("\n")
+    .map((l) => l.replace(/^[-*\d.\s]+/, "").trim())
+    .filter(Boolean)
+    .slice(0, 2)
+    .join(" ");
+  return !/^(ไม่มี|ไม่มีคำถาม|none|n\/a|-)$|^(ไม่มี|none)\b/i.test(firstLines);
+}
+
 function splitTableRow(row: string): string[] {
   let r = row.trim();
   if (r.startsWith("|")) r = r.slice(1);

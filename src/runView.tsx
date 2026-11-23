@@ -20,7 +20,13 @@ import {
   phaseAfterLog,
   type Gate,
 } from "./pipeline.js";
-import { buildStageHtml, buildFinalReportHtml, openInBrowser, hasOpenQuestions } from "./planHtml.js";
+import {
+  buildStageHtml,
+  buildFinalReportHtml,
+  openInBrowser,
+  hasOpenQuestions,
+  hasUnresolvedAgentQuestions,
+} from "./planHtml.js";
 import { notify } from "./notify.js";
 import {
   readSessionStats,
@@ -945,6 +951,7 @@ function App({
     const atTop = planScroll === 0;
     const atBottom = planScroll >= planMaxScroll;
     const hasQuestions = hasOpenQuestions(planPreview);
+    const pmPassedThrough = hasUnresolvedAgentQuestions(planPreview);
     return (
       <Box flexDirection="column" width={columns} height={rows}>
         <Box>
@@ -970,6 +977,11 @@ function App({
           {hasQuestions && (
             <Text bold color="red">
               ⚠ มีคำถามถึง PO อยู่ในเอกสารนี้ — กด a เพื่อพิมพ์คำตอบก่อนอนุมัติ
+            </Text>
+          )}
+          {pmPassedThrough && (
+            <Text bold color="yellow">
+              ⚠ ยังมีหัวข้อ "คำถามถึง PM" ค้างอยู่ — PM ควรตอบเองหรือกรองออกก่อนส่งมาถึงคุณ
             </Text>
           )}
           {planHtmlPath ? (
