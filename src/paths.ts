@@ -33,6 +33,11 @@ export const FILES = {
   // "a" key) before approving. Empty/absent when PM asked nothing or the PO
   // chose not to answer before approving anyway.
   answers: "answers.md",
+  // What the PO typed before the run started: scope limits, files not to
+  // touch, approaches the client already rejected — the context that lives
+  // in the PO's head rather than in the ClickUp ticket. Absent when they
+  // had nothing to add, which is a normal thing to have nothing of.
+  poBrief: "po-brief.md",
   pmSession: "pm-session.log",
   devSession: "dev-session.log",
   reviewerSession: "reviewer-session.log",

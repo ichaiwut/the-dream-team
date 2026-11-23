@@ -403,12 +403,19 @@ function App({
   meta,
   permissionMode,
   clickupRef,
+  briefMode,
   onDone,
 }: {
   repoRoot: string;
   meta: Meta;
   permissionMode: string;
   clickupRef: string;
+  /**
+   * "ask" opens the brief box for the PO to type into; "skip" starts
+   * straight away; any other string is a brief supplied on the command
+   * line, pre-filled so it can still be edited before it's used.
+   */
+  briefMode: string;
   onDone: (code: number) => void;
 }) {
   const { exit } = useApp();
@@ -453,8 +460,15 @@ function App({
   // ("a" key) rather than requiring the PO to edit plan.md by hand, then
   // written to answers.md for the post-approval PM invocation to read (see
   // buildInitialPrompt's continueAfterApproval branch in src/agents.ts).
-  const [answering, setAnswering] = useState(false);
-  const [answerText, setAnswerText] = useState("");
+  /**
+   * The full-screen text box, and what the typed text is for. Two moments
+   * in a run need the PO to write something rather than press a key:
+   * "brief" before anything starts (what PM should know that the ClickUp
+   * ticket doesn't say), and "answer" at a gate (replying to PM's open
+   * questions). Same box, same keys, different destination file.
+   */
+  const [textEntry, setTextEntry] = useState<"brief" | "answer" | null>(null);
+  const [entryText, setEntryText] = useState("");
   // Scrollback position in the PM transcript: null means "live" (pinned to
   // the newest output, the original behaviour), a number is the index of the
   // first visible wrapped line. The panel kept MAX_LINES of history all
@@ -736,6 +750,12 @@ function App({
       // Nothing left to run — rebuild the report rather than re-dispatching
       // a finished pipeline.
       finishRun(resumeLog, 0);
+    } else if (resume === "initial" && briefMode !== "skip") {
+      // Fresh run: ask before anything is dispatched. This is the only
+      // point where the PO can shape the work rather than react to it —
+      // every other interaction is approving something already done.
+      setEntryText(briefMode === "ask" ? "" : briefMode);
+      setTextEntry("brief");
     } else {
       startPhase(resume);
     }
@@ -816,37 +836,53 @@ function App({
   const planMaxScroll = Math.max(0, planLines.length - planVisibleRows);
 
   useInput((input, key) => {
-    if (answering) {
+    if (textEntry) {
       if (key.ctrl && input === "c") {
-        // Cancel just the answer box, not the whole run — easy to fat-finger
-        // mid-typing, and nothing's written to answers.md until Esc anyway.
-        setAnswering(false);
+        if (textEntry === "answer") {
+          // Cancel just the box, not the whole run — easy to fat-finger
+          // mid-typing, and nothing is written until Esc anyway.
+          setTextEntry(null);
+        } else {
+          // At the brief there is no run yet to go back to, so Ctrl+C
+          // means what it means everywhere else: quit.
+          setTextEntry(null);
+          onDone(130);
+          exit();
+        }
         return;
       }
       if (key.escape) {
-        const trimmed = answerText.trim();
+        const trimmed = entryText.trim();
         if (trimmed) {
           try {
-            fs.writeFileSync(featureFile(repoRoot, meta.feature, "answers"), trimmed + "\n", "utf8");
+            fs.writeFileSync(
+              featureFile(repoRoot, meta.feature, textEntry === "brief" ? "poBrief" : "answers"),
+              trimmed + "\n",
+              "utf8"
+            );
           } catch {
-            // Best-effort — if this fails PM just proceeds without answers,
-            // same as if the PO had pressed "y" without typing any.
+            // Best-effort — if this fails PM just proceeds without it,
+            // same as if the PO had typed nothing.
           }
         }
-        setAnswering(false);
-        approveGate();
+        const kind = textEntry;
+        setTextEntry(null);
+        // Empty text is a deliberate "nothing to add", not a cancel: both
+        // paths continue, they just continue with no file written.
+        if (kind === "brief") startPhase("initial");
+        else approveGate();
         return;
       }
       if (key.return) {
-        setAnswerText((t) => t + "\n");
+        setEntryText((t) => t + "\n");
         return;
       }
       if (key.backspace || key.delete) {
-        setAnswerText((t) => t.slice(0, -1));
+        setEntryText((t) => t.slice(0, -1));
         return;
       }
       if (input && !key.ctrl && !key.meta) {
-        setAnswerText((t) => t + input);
+        setEntryText((t) => t + input);
       }
       return;
     }
@@ -859,8 +895,8 @@ function App({
     }
     if (awaitingApproval) {
       if (input === "a") {
-        setAnswerText("");
-        setAnswering(true);
+        setEntryText("");
+        setTextEntry("answer");
       } else if (input === "y" || key.return) {
         approveGate();
       } else if (input === "n") {
@@ -918,13 +954,17 @@ function App({
     }
   });
 
-  if (answering) {
-    const answerLines = answerText.length === 0 ? [""] : answerText.split("\n");
+  if (textEntry) {
+    const entryLines = entryText.length === 0 ? [""] : entryText.split("\n");
+    const isBrief = textEntry === "brief";
     return (
       <Box flexDirection="column" width={columns} height={rows}>
         <Box>
           <Text bold>pmctl run — {meta.feature}</Text>
-          <Text dimColor> — พิมพ์คำตอบให้ PM ก่อนอนุมัติ plan</Text>
+          <Text dimColor>
+            {" "}
+            — {isBrief ? "บอก PM ก่อนเริ่มงาน" : "พิมพ์คำตอบให้ PM ก่อนอนุมัติ"}
+          </Text>
         </Box>
         <Box
           marginTop={1}
@@ -933,13 +973,28 @@ function App({
           borderStyle="single"
           paddingX={1}
         >
-          <Text bold color="yellow">
-            พิมพ์คำตอบคำถามที่ PM ถามไว้ (ดูหัวข้อ "คำถามถึง PO" ใน plan) · Enter ขึ้นบรรทัดใหม่ · Esc บันทึกคำตอบ +
-            อนุมัติและสั่ง Dev ต่อ · Ctrl+C ยกเลิกการพิมพ์ (กลับไปดู plan)
-          </Text>
-          {answerLines.map((l, i) => (
-            <Text key={i}>{l || " "}</Text>
-          ))}
+          {isBrief ? (
+            <>
+              <Text bold color="yellow">
+                มีอะไรอยากบอก PM ก่อนเริ่มไหม? (ไม่มีก็กด Esc ข้ามได้เลย)
+              </Text>
+              <Text dimColor>
+                เช่น ขอบเขตที่ห้ามเกิน, ไฟล์ที่ห้ามแตะ, แนวทางที่ลูกค้าเคยปฏิเสธมาแล้ว, อะไรที่ไม่ได้เขียนไว้ใน ClickUp ticket —
+                PM จะอ่านอันนี้ก่อนวางแผน และต้องสะท้อนลงใน plan.md ให้เห็นว่าเอาไปใช้ยังไง
+              </Text>
+              <Text dimColor>Enter ขึ้นบรรทัดใหม่ · Esc บันทึกแล้วเริ่มงาน · Ctrl+C ออก (ยังไม่เริ่มอะไรทั้งนั้น)</Text>
+            </>
+          ) : (
+            <Text bold color="yellow">
+              พิมพ์คำตอบคำถามที่ PM ถามไว้ (ดูหัวข้อ "คำถามถึง PO" ในเอกสาร) · Enter ขึ้นบรรทัดใหม่ · Esc บันทึกคำตอบ +
+              อนุมัติให้ทำต่อ · Ctrl+C ยกเลิกการพิมพ์ (กลับไปอ่านเอกสาร)
+            </Text>
+          )}
+          <Box marginTop={1} flexDirection="column">
+            {entryLines.map((l, i) => (
+              <Text key={i}>{l || " "}</Text>
+            ))}
+          </Box>
           <Text dimColor>█</Text>
         </Box>
       </Box>
@@ -1289,7 +1344,8 @@ export function runPmSessionWithTui(
   repoRoot: string,
   meta: Meta,
   permissionMode: string,
-  clickupRef: string
+  clickupRef: string,
+  briefMode: string = "ask"
 ): Promise<number> {
   return new Promise((resolve) => {
     render(
@@ -1298,6 +1354,7 @@ export function runPmSessionWithTui(
         meta={meta}
         permissionMode={permissionMode}
         clickupRef={clickupRef}
+        briefMode={briefMode}
         onDone={resolve}
       />
     );

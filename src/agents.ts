@@ -34,6 +34,7 @@ function buildVars(repoRoot: string, meta: Meta): Record<string, string> {
     PLAN_PATH: path.join(dir, FILES.plan),
     ANSWERS_PATH: path.join(dir, FILES.answers),
     DEV_SUMMARY_PATH: path.join(dir, FILES.devSummary),
+    PO_BRIEF_PATH: path.join(dir, FILES.poBrief),
     // Concrete, runnable command for appending a log line — see the
     // log-append subcommand in src/cli.ts for why PM must not hand-encode
     // the JSON itself.
@@ -161,8 +162,9 @@ export type PmPhase = "initial" | "dev" | "reviewer" | "tester" | "final" | "ful
  */
 const PHASE_INSTRUCTION: Record<Exclude<PmPhase, "fullRunNoGate">, string> = {
   initial:
-    `ทำตามบทบาท PM ของคุณเฉพาะขั้นตอน 0-1 เท่านั้น ` +
-    `(ดึง spec จาก ClickUp เขียน spec.md -> วางแผน -> เขียน plan.md) ` +
+    `ก่อนอื่นใช้ Read tool เช็คไฟล์ po-brief.md (path อยู่ใน role ของคุณ) — ถ้ามีและไม่ว่าง นั่นคือสิ่งที่ PO พิมพ์สั่งไว้เอง ` +
+    `ก่อนเริ่มงาน ให้ถือเป็นคำสั่งที่มีน้ำหนักเหนือการตีความ spec ของคุณเอง แล้วค่อยทำตามบทบาท PM ` +
+    `เฉพาะขั้นตอน 0-1 เท่านั้น (ดึง spec จาก ClickUp เขียน spec.md -> วางแผน -> เขียน plan.md) ` +
     `แล้วหยุดทันที รอ PO อนุมัติ ห้ามสั่ง Dev ในรอบนี้เด็ดขาด`,
   dev:
     `ทำเฉพาะขั้นตอน 2 (สั่ง Dev) เท่านั้น — สั่ง Dev หนึ่งรอบ รอผล อ่านไฟล์สรุปของ Dev ` +

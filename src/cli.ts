@@ -46,10 +46,26 @@ program
       "ค่า default ของ pmctl เอง เป็นการตัดสินใจที่ผู้ใช้ต้องเลือกเอง)",
     "acceptEdits",
   )
+  .option(
+    "--brief <text>",
+    "ข้อสั่งการถึง PM ก่อนเริ่มงาน (ขอบเขต, ไฟล์ที่ห้ามแตะ, แนวทางที่ลูกค้าปฏิเสธมาแล้ว ฯลฯ) — ปกติ pmctl จะเปิดช่องให้ " +
+      "พิมพ์เองตอนเริ่มรัน ใช้ flag นี้เมื่อต้องการสั่งมาจาก command line เลย (ยังแก้ได้ก่อนกด Esc เริ่มงาน)",
+  )
+  .option(
+    "--no-ask-brief",
+    "ข้ามช่องพิมพ์ข้อสั่งการตอนเริ่มรัน ให้ PM วางแผนจาก ClickUp ticket อย่างเดียว",
+  )
   .action(
     async (
       feature: string,
-      opts: { clickup: string; isolate?: boolean; branch?: string; permissionMode: string },
+      opts: {
+        clickup: string;
+        isolate?: boolean;
+        branch?: string;
+        permissionMode: string;
+        brief?: string;
+        askBrief?: boolean;
+      },
     ) => {
       let meta;
       if (opts.isolate) {
