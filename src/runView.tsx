@@ -16,6 +16,7 @@ import {
   checklistMark,
   formatAge,
   openGate,
+  finalDoneIndex,
   phaseAfterLog,
   type Gate,
 } from "./pipeline.js";
@@ -365,6 +366,21 @@ function App({
   // — reset by startPhase, so each stage gets exactly one gate even though
   // the step that opens it stays in the log forever.
   const gateShownRef = useRef(false);
+  /**
+   * How many log entries existed when the invocation now running started.
+   * A gate only counts if the entry that opens it is newer than this.
+   *
+   * Without it, approving a gate bounced straight back to the same gate:
+   * the step that opened it (`plan_awaiting_approval`, say) stays in the
+   * append-only log forever, and the freshly-spawned PM needs tens of
+   * seconds to boot and log anything of its own — so the very next poll,
+   * one second later, found that same step still sitting at the end of the
+   * log, re-opened the gate, and killed the PM it had just started. The
+   * run could never get past its first stage. (A stub that logged
+   * instantly closed this window, which is exactly why the pty tests
+   * didn't catch it — they now pause before logging, like the real CLI.)
+   */
+  const gateWatermarkRef = useRef(0);
   // One notification per state change, not one per poll tick — the log line
   // that triggered it stays in the log forever, so without this the PO would
   // get a bell every second for the rest of the run.
@@ -445,8 +461,10 @@ function App({
   function startPhase(phase: PmPhase, attempt: number = 1) {
     currentPhaseRef.current = phase;
     // A fresh invocation is past whichever gate opened it, so the gate
-    // machinery starts listening again from here.
+    // machinery starts listening again — but only for log entries written
+    // from here on, never the one we just approved.
     gateShownRef.current = false;
+    gateWatermarkRef.current = readLog(repoRoot, meta.feature).length;
     setActiveGate(null);
     const plan = buildPmSessionPlan(repoRoot, meta, permissionMode, clickupRef, phase);
     plan.logFile.write(plan.notice);
@@ -506,15 +524,28 @@ function App({
       const freshLog = readLog(repoRoot, meta.feature);
       // PM exited on its own at the end of its stage (the normal case when
       // it obeys "stop now" rather than needing the poll below to kill it).
+      // Same watermark rule as the poll: only a gate this invocation
+      // actually reached counts, never the one it was started from.
       const parked = exitCode === 0 ? openGate(freshLog) : null;
-      if (parked) {
+      if (parked && parked.index >= gateWatermarkRef.current) {
         gateShownRef.current = true;
         showGate(parked.gate, freshLog);
         return;
       }
-      if (exitCode === 0 && freshLog.some((e) => e.step === "final_done")) {
+      if (exitCode === 0 && finalDoneIndex(freshLog) >= gateWatermarkRef.current) {
         finishRun(freshLog, exitCode);
         return;
+      }
+      if (exitCode === 0 && freshLog.length === gateWatermarkRef.current) {
+        // Exited cleanly having logged nothing at all: its stage didn't
+        // happen. Say so rather than reporting a successful finish, since
+        // the checklist will still be sitting on the previous stage.
+        setLines((prev) =>
+          prev.concat(
+            "",
+            "⚠ PM จบรอบนี้โดยไม่ได้บันทึก log ของขั้นตอนเลย — ขั้นตอนนี้ยังไม่ได้ทำจริง รัน pmctl run ใหม่เพื่อลองอีกครั้ง"
+          )
+        );
       }
       // The run is over either way — if you walked away expecting to come
       // back to a finished feature, this is what tells you it's time.
@@ -622,19 +653,19 @@ function App({
       // from running the whole chain in one go.
       if (!gateShownRef.current && currentPhaseRef.current !== "fullRunNoGate") {
         const parked = openGate(freshLog);
-        if (parked) {
+        const finalAt = finalDoneIndex(freshLog);
+        const stopHere = () => {
           gateShownRef.current = true;
           clearPendingRetry();
           if (childRef.current && !childRef.current.killed) {
             childRef.current.kill();
           }
+        };
+        if (parked && parked.index >= gateWatermarkRef.current) {
+          stopHere();
           showGate(parked.gate, freshLog);
-        } else if (freshLog.some((e) => e.step === "final_done")) {
-          gateShownRef.current = true;
-          clearPendingRetry();
-          if (childRef.current && !childRef.current.killed) {
-            childRef.current.kill();
-          }
+        } else if (finalAt >= gateWatermarkRef.current) {
+          stopHere();
           finishRun(freshLog, 0);
         }
       }

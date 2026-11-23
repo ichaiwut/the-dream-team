@@ -119,7 +119,7 @@ export function phaseAfterLog(log: LogEntry[]): "dev" | "reviewer" | "tester" | 
  * step appear anywhere", so a completed stage from an earlier iteration
  * doesn't re-open its gate.
  */
-export function openGate(log: LogEntry[]): { gate: Gate; at: LogEntry } | null {
+export function openGate(log: LogEntry[]): { gate: Gate; at: LogEntry; index: number } | null {
   for (let i = log.length - 1; i >= 0; i--) {
     const entry = log[i];
     if (entry.step === "final_done") return null;
@@ -131,17 +131,23 @@ export function openGate(log: LogEntry[]): { gate: Gate; at: LogEntry } | null {
       if (gate.afterStep === "iteration") {
         for (let j = i - 1; j >= 0; j--) {
           if (log[j].step === "tester_started") {
-            return { gate: { ...gate, source: "report", artifact: "testHtml" }, at: entry };
+            return { gate: { ...gate, source: "report", artifact: "testHtml" }, at: entry, index: i };
           }
-          if (log[j].step === "reviewer_started") return { gate, at: entry };
+          if (log[j].step === "reviewer_started") return { gate, at: entry, index: i };
         }
       }
-      return { gate, at: entry };
+      return { gate, at: entry, index: i };
     }
     // A *_started step means that stage is in flight, not parked.
     if (entry.step.endsWith("_started")) return null;
   }
   return null;
+}
+
+/** Index of the first `final_done`, or -1. Callers compare it against a
+ *  watermark for the same reason gates do — see openGate's callers. */
+export function finalDoneIndex(log: LogEntry[]): number {
+  return log.findIndex((e) => e.step === "final_done");
 }
 
 export interface ChecklistItem {
