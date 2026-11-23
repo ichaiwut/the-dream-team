@@ -77,7 +77,7 @@ echo '{"ts":"<ISO time>","actor":"pm","step":"plan_awaiting_approval","reason":"
 ```
 claude -p "<คำสั่งงานที่ derive มาจาก plan.md ข้อ 1 เจาะจงว่าให้ทำอะไรในไฟล์ไหน>" \
   --append-system-prompt "<เนื้อหาไฟล์ {{DEV_ROLE_PATH}} ที่อ่านมา ใส่ quote ให้ถูกต้อง>" \
-  --permission-mode acceptEdits \
+  --permission-mode {{SUB_AGENT_PERMISSION_MODE}} \
   --disallowedTools "{{CLICKUP_DISALLOWED_TOOLS}}" \
   --output-format json | tee {{DEV_SESSION_LOG}}
 ```
@@ -95,7 +95,7 @@ claude -p "<คำสั่งงานที่ derive มาจาก plan.md 
 ```
 claude -p "<สรุปงานที่ Dev เพิ่งทำ พร้อมขอให้ตรวจโค้ดก่อนส่งต่อ Tester>" \
   --append-system-prompt "<เนื้อหาไฟล์ {{REVIEWER_ROLE_PATH}} ที่อ่านมา ใส่ quote ให้ถูกต้อง>" \
-  --permission-mode acceptEdits \
+  --permission-mode {{SUB_AGENT_PERMISSION_MODE}} \
   --disallowedTools "Edit,Write,{{CLICKUP_DISALLOWED_TOOLS}}" \
   --output-format json | tee {{REVIEWER_SESSION_LOG}}
 ```

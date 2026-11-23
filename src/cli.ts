@@ -36,7 +36,16 @@ program
     "--branch <name>",
     "ใช้กับ --isolate เท่านั้น: ชื่อ branch ที่สร้างไว้ล่วงหน้าแล้ว ค่าเริ่มต้นคือ feature/<feature>",
   )
-  .option("--permission-mode <mode>", "permission mode ที่ส่งให้ PM session", "acceptEdits")
+  .option(
+    "--permission-mode <mode>",
+    "permission mode ที่ส่งให้ PM session (และ Dev/Reviewer/Tester ที่ PM สั่งต่อ ดูหัวข้อ permission mode ใน " +
+      "README) ค่าเริ่มต้นคือ acceptEdits (auto-accept แค่ Edit/Write) — ถ้า Dev/Reviewer/Tester รันคำสั่ง bash ที่ไม่มี " +
+      "allow rule ไว้ล่วงหน้า จะไปค้างรอ approval ที่ไม่มีใครตอบได้ (รันแบบ headless -p ทั้งสาย ไม่มี TTY) เนื่องจาก " +
+      "pmctl run มี gate ให้ PO กด y/n อนุมัติ plan เป็นมนุษย์อยู่แล้วก่อนจะถึงขั้นสั่ง Dev ทุกครั้ง ถ้าไม่ต้องการให้ค้างแบบนี้อีก " +
+      "ให้สั่งรันด้วย --permission-mode bypassPermissions เอง (ข้ามการขออนุมัติระดับ tool-call ทั้งหมดหลังจากจุดนั้น ไม่ใช่ " +
+      "ค่า default ของ pmctl เอง เป็นการตัดสินใจที่ผู้ใช้ต้องเลือกเอง)",
+    "acceptEdits",
+  )
   .action(
     async (
       feature: string,

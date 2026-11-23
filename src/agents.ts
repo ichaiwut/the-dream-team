@@ -150,6 +150,18 @@ export function buildPmSessionPlan(
   phase: PmPhase = "fullRunNoGate"
 ): PmSessionPlan {
   const vars = buildVars(repoRoot, meta);
+  // Dev/Reviewer/Tester are spawned by PM's own Bash tool as nested, fully
+  // headless `claude -p` calls with no human attached. Any Bash command one
+  // of them runs that isn't already covered by an allow rule in
+  // .claude/settings.local.json hits an interactive approval prompt — which
+  // just hangs forever in -p mode, since nothing can answer it (a real run
+  // hit this on a plain `cp *.png ...`, not anything exotic). "acceptEdits"
+  // only auto-approves Edit/Write tool calls, not Bash, so it never
+  // prevented this. roles/pm.md now passes this through to Dev/Reviewer/
+  // Tester's own --permission-mode instead of hardcoding "acceptEdits",
+  // so whatever mode the PO chose for PM (see src/cli.ts's --permission-mode
+  // default) governs the sub-agents too, rather than silently overriding it.
+  vars.SUB_AGENT_PERMISSION_MODE = permissionMode;
   const pmRoleTemplate = fs.readFileSync(path.join(ROLES_DIR, "pm.md"), "utf8");
   const pmSystemPrompt = fillTemplate(pmRoleTemplate, vars);
 
