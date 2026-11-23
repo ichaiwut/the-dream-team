@@ -31,6 +31,11 @@ function buildVars(repoRoot: string, meta: Meta): Record<string, string> {
     DEV_ROLE_PATH: path.join(ROLES_DIR, "dev.md"),
     REVIEWER_ROLE_PATH: path.join(ROLES_DIR, "reviewer.md"),
     TESTER_ROLE_PATH: path.join(ROLES_DIR, "tester.md"),
+    // Same blocklist PM itself is spawned with (src/clickupTools.ts). PM's
+    // role prompt uses this to pass --disallowedTools when it spawns Dev,
+    // Reviewer and Tester, so "no ClickUp access" is enforced at the
+    // permission level for all four roles, not just told to PM in prose.
+    CLICKUP_DISALLOWED_TOOLS: CLICKUP_WRITE_TOOLS.join(","),
   };
 }
 

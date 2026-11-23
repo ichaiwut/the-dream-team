@@ -16,7 +16,7 @@ Giving one agent full autonomy over a feature — writing the code, testing it, 
 
 | Rule | How it's enforced |
 |---|---|
-| ClickUp is write-only for the PO; PM only reads it | PM uses your own already-authenticated ClickUp MCP connector to read a task, but is spawned with `--disallowedTools` naming every write-capable ClickUp tool (`src/clickupTools.ts`) — Claude Code's own permission system refuses the call if PM tries one. This is a blocklist, not a withheld credential; see "Known limitations" |
+| ClickUp is write-only for the PO; everyone else only reads it (PM) or doesn't touch it at all (Dev/Reviewer/Tester) | PM uses your own already-authenticated ClickUp MCP connector to read a task, but is spawned with `--disallowedTools` naming every write-capable ClickUp tool (`src/clickupTools.ts`) — Claude Code's own permission system refuses the call if PM tries one. `roles/pm.md` passes the exact same `--disallowedTools` list when it spawns Dev, Reviewer and Tester, so none of them can write to ClickUp either, not just PM. This is a blocklist, not a withheld credential; see "Known limitations" |
 | The working log is never stored in ClickUp | Every milestone is appended to a local, append-only `.pmctl/<feature>/log.ndjson` — plain files the PO can read any time without waiting on a summary |
 | PM must plan before dispatching Dev | `roles/pm.md` requires `plan.md` (goal, approach, flow, affected files) to exist before Dev is invoked, for every feature regardless of size |
 | Code gets reviewed before it gets tested | `roles/pm.md` forbids dispatching Tester until Reviewer has written a PASS verdict to `review.md`; a FAIL sends Dev back to fix it, same loop a failed test uses |
