@@ -234,6 +234,30 @@ function wrapLines(lines: string[], width: number): string[] {
   return lines.flatMap((l) => wrapLine(l, width));
 }
 
+interface PlanLine {
+  text: string;
+  heading: boolean;
+}
+
+/**
+ * Turns raw plan.md markdown into lines fit for the full-width approval
+ * screen: `#`-headings get stripped of their hashes and rendered bold/cyan so
+ * the plan's own section structure (the "summary") is visible at a glance
+ * instead of reading as an undifferentiated wall of text, and every line is
+ * wrapped against the *real* full terminal width rather than a cramped
+ * one-third-of-screen side panel.
+ */
+function renderPlanLines(raw: string, width: number): PlanLine[] {
+  const out: PlanLine[] = [];
+  for (const rawLine of splitLines(raw)) {
+    const trimmed = rawLine.trimStart();
+    const isHeading = /^#{1,6}\s/.test(trimmed);
+    const content = isHeading ? trimmed.replace(/^#{1,6}\s*/, "") : rawLine;
+    for (const w of wrapLine(content, width)) out.push({ text: w, heading: isHeading });
+  }
+  return out;
+}
+
 /** Tracks the real terminal size and re-renders on resize, so the UI always fills the screen. */
 function useTerminalSize() {
   const [size, setSize] = useState({
@@ -275,6 +299,9 @@ function App({
   const [done, setDone] = useState<{ code: number; rejected?: boolean } | null>(null);
   const [awaitingApproval, setAwaitingApproval] = useState(false);
   const [planPreview, setPlanPreview] = useState("");
+  // Starts at the top of the plan (not the tail) every time a fresh plan is
+  // shown, since the top is where the summary/overview lives.
+  const [planScroll, setPlanScroll] = useState(0);
   const childRef = useRef<ChildProcessByStdio<null, Readable, Readable> | null>(null);
   const tailRef = useRef(""); // carries a partial last line between chunks
 
@@ -322,6 +349,7 @@ function App({
         !freshLog.some((e) => e.step === "dev_started");
       if (reachedApprovalPoint) {
         setPlanPreview(readPlanPreview(repoRoot, meta.feature));
+        setPlanScroll(0);
         setAwaitingApproval(true);
       } else {
         setDone({ code: code ?? 0 });
@@ -333,6 +361,7 @@ function App({
     const resume = determineResumePhase(repoRoot, meta.feature);
     if (resume === "awaitingApprovalResume") {
       setPlanPreview(readPlanPreview(repoRoot, meta.feature));
+      setPlanScroll(0);
       setAwaitingApproval(true);
     } else {
       startPhase(resume);
@@ -358,6 +387,18 @@ function App({
     return () => clearInterval(timer);
   }, [repoRoot, meta.feature]);
 
+  // Full-screen plan view: the whole terminal width/height (minus the header
+  // line and this panel's own border+instructions+scroll-indicator rows),
+  // not the cramped one-third-of-screen side panel the approval prompt used
+  // to share with the PM transcript. That old layout only ever showed the
+  // *tail* of plan.md — which, for anything longer than a screen, hid the
+  // summary at the top entirely. This view starts at the top and scrolls.
+  const planWidth = Math.max(40, columns - 2);
+  const planPanelHeight = Math.max(5, rows - HEADER_ROWS);
+  const planVisibleRows = Math.max(1, planPanelHeight - PANEL_CHROME_ROWS - 2);
+  const planLines = awaitingApproval ? renderPlanLines(planPreview, planWidth - PANEL_INNER_PADDING) : [];
+  const planMaxScroll = Math.max(0, planLines.length - planVisibleRows);
+
   useInput((input, key) => {
     if (key.ctrl && input === "c") {
       childRef.current?.kill();
@@ -373,6 +414,18 @@ function App({
       } else if (input === "n") {
         setAwaitingApproval(false);
         setDone({ code: 2, rejected: true });
+      } else if (key.downArrow || input === "j") {
+        setPlanScroll((s) => Math.min(planMaxScroll, s + 1));
+      } else if (key.upArrow || input === "k") {
+        setPlanScroll((s) => Math.max(0, s - 1));
+      } else if (input === "f" || input === " ") {
+        setPlanScroll((s) => Math.min(planMaxScroll, s + planVisibleRows));
+      } else if (input === "b") {
+        setPlanScroll((s) => Math.max(0, s - planVisibleRows));
+      } else if (input === "g") {
+        setPlanScroll(0);
+      } else if (input === "G") {
+        setPlanScroll(planMaxScroll);
       }
       return;
     }
@@ -381,6 +434,43 @@ function App({
       exit();
     }
   });
+
+  if (awaitingApproval) {
+    const visiblePlan = planLines.slice(planScroll, planScroll + planVisibleRows);
+    const atTop = planScroll === 0;
+    const atBottom = planScroll >= planMaxScroll;
+    return (
+      <Box flexDirection="column" width={columns} height={rows}>
+        <Box>
+          <Text bold>pmctl run — {meta.feature}</Text>
+          <Text dimColor> (branch={meta.branch}) — plan.md รออนุมัติ</Text>
+        </Box>
+        <Box
+          marginTop={1}
+          height={planPanelHeight}
+          flexDirection="column"
+          borderStyle="single"
+          paddingX={1}
+        >
+          <Text bold color="yellow">
+            กด y หรือ Enter เพื่ออนุมัติและสั่ง Dev ต่อ · n ยกเลิก (แก้ plan.md เองได้แล้วรัน pmctl run ใหม่) · ↑/↓
+            หรือ j/k เลื่อน · space/f หน้าถัดไป · b หน้าก่อนหน้า · g/G บนสุด/ล่างสุด
+          </Text>
+          <Text dimColor>
+            บรรทัด {planLines.length === 0 ? 0 : planScroll + 1}-{Math.min(planLines.length, planScroll + planVisibleRows)} จาก{" "}
+            {planLines.length}
+            {atTop ? "" : " ↑มีต่อด้านบน"}
+            {atBottom ? "" : " ↓มีต่อด้านล่าง"}
+          </Text>
+          {visiblePlan.map((l, i) => (
+            <Text key={i} bold={l.heading} color={l.heading ? "cyan" : undefined} wrap="truncate-end">
+              {l.text || " "}
+            </Text>
+          ))}
+        </Box>
+      </Box>
+    );
+  }
 
   // Fill the real terminal: compute panel widths/heights from the current
   // columns/rows instead of hardcoding them, and recompute whenever the
@@ -404,11 +494,11 @@ function App({
   // Narrow-terminal fallback prints one extra hint line below the panels,
   // so reserve a row for it or the layout would overflow the real terminal.
   const panelHeight = Math.max(5, rows - HEADER_ROWS - (showSubPanel ? 0 : 1));
-  const visibleRows = Math.max(1, panelHeight - PANEL_CHROME_ROWS - (done || awaitingApproval ? 1 : 0));
+  const visibleRows = Math.max(1, panelHeight - PANEL_CHROME_ROWS - (done ? 1 : 0));
 
   const checklist = computeChecklist(log);
   const subPanelTitle = subAgent ? AGENT_PANEL_TITLE[subAgent] : "SUB-AGENT (ยังไม่เริ่ม)";
-  const footerHint = awaitingApproval ? ", y/Enter อนุมัติ, n ยกเลิก" : done ? ", q/Enter ออก" : "";
+  const footerHint = done ? ", q/Enter ออก" : "";
 
   return (
     <Box flexDirection="column" width={columns} height={rows}>
@@ -451,34 +541,16 @@ function App({
           marginLeft={1}
         >
           <Text bold dimColor>
-            {awaitingApproval ? "PLAN — รออนุมัติ" : "PM SESSION (live)"}
+            PM SESSION (live)
           </Text>
-          {awaitingApproval ? (
-            <>
-              <Text bold color="yellow">
-                plan.md พร้อมแล้ว — กด y หรือ Enter เพื่ออนุมัติและสั่ง Dev ต่อ, n เพื่อยกเลิก (แก้ plan.md เองได้ แล้วรัน
-                pmctl run ใหม่เพื่อดูอีกรอบ)
+          {lines.length === 0 && !done && <Text dimColor>(กำลังเริ่ม...)</Text>}
+          {wrapLines(lines, pmWidth - PANEL_INNER_PADDING)
+            .slice(-visibleRows)
+            .map((l, i) => (
+              <Text key={i} wrap="truncate-end">
+                {l}
               </Text>
-              {wrapLines(splitLines(planPreview), pmWidth - PANEL_INNER_PADDING)
-                .slice(-(visibleRows - 2))
-                .map((l, i) => (
-                  <Text key={i} wrap="truncate-end">
-                    {l}
-                  </Text>
-                ))}
-            </>
-          ) : (
-            <>
-              {lines.length === 0 && !done && <Text dimColor>(กำลังเริ่ม...)</Text>}
-              {wrapLines(lines, pmWidth - PANEL_INNER_PADDING)
-                .slice(-visibleRows)
-                .map((l, i) => (
-                  <Text key={i} wrap="truncate-end">
-                    {l}
-                  </Text>
-                ))}
-            </>
-          )}
+            ))}
           {done && !done.rejected && (
             <Text bold color={done.code === 0 ? "green" : "red"}>
               -- จบแล้ว (exit code {done.code}) --
