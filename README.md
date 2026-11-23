@@ -1,15 +1,16 @@
 # pmctl
 
-A local CLI orchestrator for a strict PO → PM → Dev → Tester agent chain, built on top of [Claude Code](https://claude.com/claude-code). Inspired by [saaio](https://saaio.dev/)'s worktree-per-flow model, scoped down to a single accountable chain instead of a multi-worker TUI.
+A local CLI orchestrator for a strict PO → PM → Dev → Reviewer → Tester agent chain, built on top of [Claude Code](https://claude.com/claude-code). Inspired by [saaio](https://saaio.dev/)'s worktree-per-flow model, scoped down to a single accountable chain instead of a multi-worker TUI.
 
 ## Why
 
-Giving one agent full autonomy over a feature — writing the code, testing it, and deciding it's done — means the same model grades its own work. `pmctl` splits that into three roles with a hard communication boundary, and gives the human (PO) a durable, auditable trail without needing to sit in on every exchange:
+Giving one agent full autonomy over a feature — writing the code, testing it, and deciding it's done — means the same model grades its own work. `pmctl` splits that into separate roles with a hard communication boundary, and gives the human (PO) a durable, auditable trail without needing to sit in on every exchange:
 
-- **PO** (you) — owns the spec in ClickUp and signs off on acceptance testing. Never talks to Dev or Tester directly.
-- **PM** (agent) — reads the spec, writes a plan before any code is touched, dispatches Dev and Tester, and is the only role that talks to either of them.
+- **PO** (you) — owns the spec in ClickUp and signs off on acceptance testing. Never talks to Dev, Reviewer or Tester directly.
+- **PM** (agent) — reads the spec, writes a plan before any code is touched, dispatches Dev, Reviewer and Tester in that order, and is the only role that talks to any of them.
 - **Dev** (agent) — implements against PM's instructions in the working copy PM dispatched it to (your current checkout by default, or an isolated git worktree with `--isolate`). Has no path to reach the PO.
-- **Tester** (agent) — independently verifies Dev's work by actually running tests (unit, then real e2e), not by reading the diff and approving it.
+- **Reviewer** (agent) — reviews Dev's code for security issues, bad patterns, and drift from the plan, *before* Tester ever runs — not by running anything, just reading the diff. Can't edit files itself (`--disallowedTools "Edit,Write"`); a blocker sends PM back to Dev, same as a failed test would.
+- **Tester** (agent) — independently verifies Dev's (reviewed) work by actually running tests (unit, then real e2e), not by reading the diff and approving it.
 
 ## Design rules this tool enforces
 
@@ -18,8 +19,10 @@ Giving one agent full autonomy over a feature — writing the code, testing it, 
 | ClickUp is write-only for the PO; PM only reads it | PM uses your own already-authenticated ClickUp MCP connector to read a task, but is spawned with `--disallowedTools` naming every write-capable ClickUp tool (`src/clickupTools.ts`) — Claude Code's own permission system refuses the call if PM tries one. This is a blocklist, not a withheld credential; see "Known limitations" |
 | The working log is never stored in ClickUp | Every milestone is appended to a local, append-only `.pmctl/<feature>/log.ndjson` — plain files the PO can read any time without waiting on a summary |
 | PM must plan before dispatching Dev | `roles/pm.md` requires `plan.md` (goal, approach, flow, affected files) to exist before Dev is invoked, for every feature regardless of size |
+| Code gets reviewed before it gets tested | `roles/pm.md` forbids dispatching Tester until Reviewer has written a PASS verdict to `review.md`; a FAIL sends Dev back to fix it, same loop a failed test uses |
+| Reviewer can't fix what it flags | Reviewer is spawned with `--disallowedTools "Edit,Write"` — it can point out a problem but can't patch around it itself, keeping the "who wrote it" / "who checked it" separation real |
 | Tester must prove it, not assert it | `roles/tester.md` forbids a pass verdict based on reading code; it must run the unit suite, then execute real e2e scenarios against a running instance, and cite command output as evidence in `report.md` |
-| Plan and test report are separate artifacts | `plan.md` is owned by PM, `report.md` is owned by Tester — each one documents one side of the work |
+| Plan, review and test report are separate artifacts | `plan.md` is owned by PM, `review.md` is owned by Reviewer, `report.md` is owned by Tester — each one documents one side of the work |
 
 ## Requirements
 
@@ -46,7 +49,7 @@ The `claude` CLI flags this tool shells out to (`--append-system-prompt`, `--per
 claude --help
 ```
 
-and compare against what's used in `src/agents.ts` and `roles/pm.md`. If something's changed, `roles/pm.md` is the only file to edit — PM constructs its own calls to Dev and Tester from that template via its bash tool, so a flag change doesn't require touching any TypeScript.
+and compare against what's used in `src/agents.ts` and `roles/pm.md`. If something's changed, `roles/pm.md` is the only file to edit — PM constructs its own calls to Dev, Reviewer and Tester from that template via its bash tool, so a flag change doesn't require touching any TypeScript.
 
 `--permission-mode acceptEdits` is the default, so file edits are accepted without an interactive prompt (this runs unattended). Pass `--permission-mode <mode>` to `pmctl run` to tighten or loosen that for a given feature.
 
@@ -54,7 +57,7 @@ Also double-check `src/clickupTools.ts` against your connector's actual current 
 
 ## Usage
 
-`pmctl` never creates or deletes branches itself — that stays the PO's call. By default it also doesn't create a worktree: it runs PM/Dev/Tester directly in whatever branch you already have checked out.
+`pmctl` never creates or deletes branches itself — that stays the PO's call. By default it also doesn't create a worktree: it runs PM/Dev/Reviewer/Tester directly in whatever branch you already have checked out.
 
 ```bash
 cd your-backend-repo
@@ -67,7 +70,7 @@ pmctl run add-dark-mode --clickup "https://app.clickup.com/t/9018044177/DSAG-218
 This will:
 
 1. Record the feature against your current branch (no new branch, no new worktree, no port reassignment — it's literally the directory you're standing in)
-2. Start a PM session (a `claude` subprocess with its own bash access, using your existing ClickUp connector) that follows `roles/pm.md`: fetch the ClickUp task itself and write `spec.md` → plan → write `plan.md` → dispatch Dev → dispatch Tester (real e2e) → loop on failure → final summary
+2. Start a PM session (a `claude` subprocess with its own bash access, using your existing ClickUp connector) that follows `roles/pm.md`: fetch the ClickUp task itself and write `spec.md` → plan → write `plan.md` → dispatch Dev → dispatch Reviewer (code review, blocks on FAIL) → dispatch Tester (real e2e) → loop on failure → final summary
 
 ### Running more than one feature at once
 
@@ -92,6 +95,7 @@ You can still inspect progress from elsewhere at any point without interrupting 
 pmctl status                 # every feature currently in flight, with its last log entry
 pmctl log add-dark-mode      # full append-only log: who did what, and why
 pmctl plan add-dark-mode     # PM's plan.md
+pmctl review add-dark-mode   # Reviewer's review.md
 pmctl report add-dark-mode   # Tester's report.md
 pmctl watch                  # live Ink dashboard of every feature at once (not just the one you're running here)
 ```
@@ -119,13 +123,14 @@ pmctl clean add-dark-mode    # removes the worktree (--isolate runs only); .pmct
   meta.json       # branch, worktree path, port, ClickUp task id
   spec.md         # ClickUp snapshot — PM reads this, never writes to it
   plan.md         # written by PM before Dev starts
+  review.md       # written by Reviewer before Tester is allowed to run
   report.md       # written by Tester after running real tests
-  log.ndjson      # append-only; every PM/Dev/Tester milestone, with reasons
+  log.ndjson      # append-only; every PM/Dev/Reviewer/Tester milestone, with reasons
   pm-session.log  # raw transcript of the PM session, for deep debugging
 ```
 
 ## Known limitations
 
 - **"Read-only ClickUp access" is a blocklist, not a structural guarantee.** `src/clickupTools.ts` names every write-capable ClickUp MCP tool visible when this was written, passed to `--disallowedTools`. If the ClickUp connector adds a new write tool later and this list isn't updated, PM would not be blocked from using it. Re-check it periodically. (An earlier version of this tool used a manually-exported `CLICKUP_API_TOKEN` that was never forwarded to subprocesses — a stronger, credential-level guarantee, at the cost of one extra setup step and not reusing your existing connector. Revert to that approach in `src/agents.ts`/`roles/pm.md` if the blocklist's weaker guarantee isn't acceptable for your use case.)
-- Not yet validated end-to-end against a live `claude` CLI — the environment this was built in doesn't have Claude Code installed, so `--disallowedTools` blocking the right tool names has not been confirmed against a real ClickUp connector either. The worktree/port/log mechanics are tested and working; the PM→Dev→Tester loop and the tool-blocking has only been verified at the level of "does it assemble the right command," not a real run. Expect to adjust flags, tool names, or prompt wording on first use.
+- Not yet validated end-to-end against a live `claude` CLI — the environment this was built in doesn't have Claude Code installed, so `--disallowedTools` blocking the right tool names has not been confirmed against a real ClickUp connector either. The worktree/port/log mechanics are tested and working; the PM→Dev→Reviewer→Tester loop and the tool-blocking has only been verified at the level of "does it assemble the right command," not a real run. Expect to adjust flags, tool names, or prompt wording on first use.
 - No sandboxing beyond what `--permission-mode` and `--disallowedTools` give you. `acceptEdits` auto-accepts file changes from Dev with no human in the loop — for anything touching production data or paying customers, use a stricter permission mode or review the diff before merging regardless of what Tester reports.

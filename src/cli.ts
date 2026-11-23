@@ -19,7 +19,7 @@ const program = new Command();
 program
   .name("pmctl")
   .description(
-    "Local PO -> PM agent -> Dev agent -> Tester agent orchestrator, built on the claude CLI (Claude Code)."
+    "Local PO -> PM agent -> Dev agent -> Reviewer agent -> Tester agent orchestrator, built on the claude CLI (Claude Code)."
   );
 
 program
@@ -123,6 +123,14 @@ program
   .action((feature: string) => {
     const file = featureFile(repoRoot, feature, "plan");
     console.log(fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "(PM ยังไม่เขียนแผนงาน)");
+  });
+
+program
+  .command("review <feature>")
+  .description("เปิดอ่านผลตรวจโค้ด (review.md) ของ feature นี้")
+  .action((feature: string) => {
+    const file = featureFile(repoRoot, feature, "review");
+    console.log(fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "(Reviewer ยังไม่เขียนผลตรวจ)");
   });
 
 program

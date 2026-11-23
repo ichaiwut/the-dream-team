@@ -1,7 +1,7 @@
 {
   "name": "pmctl",
   "version": "0.1.0",
-  "description": "Local orchestrator: PO -> PM agent -> Dev agent -> Tester agent, built on the claude CLI (Claude Code).",
+  "description": "Local orchestrator: PO -> PM agent -> Dev agent -> Reviewer agent -> Tester agent, built on the claude CLI (Claude Code).",
   "type": "module",
   "bin": {
     "pmctl": "./dist/cli.js"

@@ -24,6 +24,8 @@ const PIPELINE: { id: string; label: string }[] = [
   { id: "plan_written", label: "วางแผน (plan.md)" },
   { id: "dev_started", label: "สั่ง Dev" },
   { id: "dev_done", label: "Dev ทำงานเสร็จ" },
+  { id: "reviewer_started", label: "สั่ง Reviewer ตรวจโค้ด" },
+  { id: "reviewer_done", label: "Reviewer ผ่านแล้ว" },
   { id: "tester_started", label: "สั่ง Tester (e2e)" },
   { id: "tester_done", label: "Tester ตรวจสอบเสร็จ" },
   { id: "final_done", label: "จบงาน" },

@@ -23,11 +23,13 @@ function buildVars(repoRoot: string, meta: Meta): Record<string, string> {
   return {
     SPEC_PATH: path.join(dir, FILES.spec),
     PLAN_PATH: path.join(dir, FILES.plan),
+    REVIEW_PATH: path.join(dir, FILES.review),
     REPORT_PATH: path.join(dir, FILES.report),
     LOG_PATH: path.join(dir, FILES.log),
     WORKTREE_PATH: meta.worktreePath,
     PORT: String(meta.port),
     DEV_ROLE_PATH: path.join(ROLES_DIR, "dev.md"),
+    REVIEWER_ROLE_PATH: path.join(ROLES_DIR, "reviewer.md"),
     TESTER_ROLE_PATH: path.join(ROLES_DIR, "tester.md"),
   };
 }

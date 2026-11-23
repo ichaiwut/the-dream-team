@@ -18,7 +18,7 @@ function listFeatures(repoRoot: string): string[] {
 }
 
 export function stepColor(step: string): string {
-  if (step === "final_done" || step === "tester_done") return "green";
+  if (step === "final_done" || step === "tester_done" || step === "reviewer_done") return "green";
   if (step === "needs_po_attention") return "red";
   if (step === "iteration") return "yellow";
   return "cyan";

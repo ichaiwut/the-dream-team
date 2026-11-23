@@ -19,6 +19,7 @@ export const FILES = {
   meta: "meta.json",
   spec: "spec.md",
   plan: "plan.md",
+  review: "review.md",
   report: "report.md",
   log: "log.ndjson",
   pmSession: "pm-session.log",
