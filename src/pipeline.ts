@@ -33,7 +33,12 @@ export const PIPELINE: { id: string; label: string }[] = [
  */
 export interface Gate {
   afterStep: string;
-  nextPhase: "dev" | "reviewer" | "tester" | "final";
+  /**
+   * The phase approving this gate starts. "retry" re-runs the stage that
+   * is already in flight — used when PM stopped to ask something rather
+   * than finishing, so the stage still has to happen.
+   */
+  nextPhase: "dev" | "reviewer" | "tester" | "final" | "retry";
   title: string;
   question: string;
   /** FILES key of the markdown the PO reads at this gate. */
@@ -43,6 +48,20 @@ export interface Gate {
 }
 
 export const GATES: Gate[] = [
+  {
+    // PM stopped to ask the PO something instead of finishing its stage.
+    // Before this existed, PM had no way to raise a question: roles/pm.md
+    // told it to log this and stop, and pmctl read "stopped" as "the run
+    // is over", so the question died with the run and re-running just
+    // reproduced it. First in the list so it wins over a stage gate logged
+    // in the same round.
+    afterStep: "needs_po_attention",
+    nextPhase: "retry",
+    title: "PM มีเรื่องต้องถามก่อนไปต่อ",
+    question: "ตอบคำถามของ PM แล้วให้ทำขั้นตอนนี้ต่อ (กด a พิมพ์คำตอบ แล้ว Esc)",
+    source: "plan",
+    artifact: "planHtml",
+  },
   {
     afterStep: "plan_awaiting_approval",
     nextPhase: "dev",

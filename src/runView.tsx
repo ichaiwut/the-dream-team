@@ -674,8 +674,8 @@ function App({
    * browser, or no opener binary, nothing opens and the terminal's own
    * scrollable view below carries the same content.
    */
-  function showGate(gate: Gate, freshLog: LogEntry[]) {
-    const markdown = readStageMarkdown(repoRoot, meta.feature, gate.source);
+  function showGate(gate: Gate, freshLog: LogEntry[], bodyOverride?: string) {
+    const markdown = bodyOverride ?? readStageMarkdown(repoRoot, meta.feature, gate.source);
     setActiveGate(gate);
     setPlanPreview(markdown);
     setPlanScroll(0);
@@ -800,8 +800,24 @@ function App({
     setDone({ code: 130 });
   }
 
+  /**
+   * PM's closing words from the invocation that just ended — the tail of
+   * its transcript, which is where a question it decided to ask instead of
+   * acting will be.
+   */
+  function lastPmMessage(rawOutput: string): string {
+    // The tail, not the whole thing: a phase's output can be long, and a
+    // question PM decided to ask will be at the end of it.
+    const tail = splitLines(rawOutput.trim()).slice(-60).join("\n").trim();
+    return tail ? `# PM พูดไว้ตอนจบรอบ\n\n${tail}` : "# PM จบรอบโดยไม่ได้พูดอะไรเลย";
+  }
+
   function approveGate() {
-    const next = activeGate?.nextPhase ?? "dev";
+    const gateNext = activeGate?.nextPhase ?? "dev";
+    // "retry" means PM stopped to ask rather than finishing, so the stage
+    // it was in still has to run — with whatever the PO just typed now
+    // sitting in answers.md for it to read.
+    const next: PmPhase = gateNext === "retry" ? (currentPhaseRef.current ?? "dev") : gateNext;
     if (activeGate && planHtmlPath !== "") {
       setLastArtifact({ label: activeGate.title, path: planHtmlPath });
     }
@@ -930,15 +946,32 @@ function App({
         return;
       }
       if (exitCode === 0 && freshLog.length === gateWatermarkRef.current) {
-        // Exited cleanly having logged nothing at all: its stage didn't
-        // happen. Say so rather than reporting a successful finish, since
-        // the checklist will still be sitting on the previous stage.
+        // Exited cleanly having logged nothing at all. In practice this
+        // means PM used its final answer to ask the PO something instead
+        // of doing the stage — it has no other way to raise a question
+        // mid-stage. Ending the run here left the PO with a dead terminal
+        // and a question nobody could answer, and re-running just
+        // reproduced it. Treat it as the question it is: show what PM
+        // said, let the PO answer, and re-run the stage.
+        gateShownRef.current = true;
         setLines((prev) =>
-          prev.concat(
-            "",
-            "⚠ PM จบรอบนี้โดยไม่ได้บันทึก log ของขั้นตอนเลย — ขั้นตอนนี้ยังไม่ได้ทำจริง รัน pmctl run ใหม่เพื่อลองอีกครั้ง"
-          )
+          prev.concat("", "⚠ PM จบรอบนี้โดยไม่ได้ทำขั้นตอน — ถือว่ามันมีเรื่องจะถาม ดูคำตอบสุดท้ายของมันด้านล่าง")
         );
+        showGate(
+          {
+            afterStep: "pm_asked_without_logging",
+            nextPhase: "retry",
+            title: "PM ไม่ได้ทำขั้นตอนนี้ — น่าจะติดอะไรอยู่",
+            question: "อ่านคำตอบสุดท้ายของ PM แล้วกด a พิมพ์คำตอบ/คำสั่งเพิ่ม · y ให้ลองขั้นตอนนี้ใหม่ · n หยุดไว้ก่อน",
+            source: "plan",
+            artifact: "planHtml",
+          },
+          freshLog,
+          // Show PM's own last words, not plan.md: what it said is the
+          // only place the question exists.
+          lastPmMessage(rawOutput)
+        );
+        return;
       }
       // The run is over either way — if you walked away expecting to come
       // back to a finished feature, this is what tells you it's time.
