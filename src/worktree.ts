@@ -58,6 +58,15 @@ function currentBranch(repoRoot: string): string {
   }).trim();
 }
 
+/** The feature's meta if it has been started before, else null. */
+function tryLoadMeta(repoRoot: string, feature: string): Meta | null {
+  try {
+    return loadMeta(repoRoot, feature);
+  } catch {
+    return null;
+  }
+}
+
 function assertFeatureFree(repoRoot: string, feature: string): string {
   const metaPath = featureFile(repoRoot, feature, "meta");
   if (fs.existsSync(metaPath)) {
@@ -82,7 +91,27 @@ function writeMeta(repoRoot: string, feature: string, meta: Meta): Meta {
  * doesn't matter and the PO doesn't want pmctl touching git branches at all.
  */
 export function useCurrentCheckout(repoRoot: string, feature: string, clickupTaskId?: string): Meta {
-  assertFeatureFree(repoRoot, feature);
+  // An existing feature means "carry on with it", not "name collision".
+  // Resuming after a stop, an interrupt, or just closing the terminal is
+  // the normal way to use this — and refusing it here made resume
+  // impossible through the CLI entirely, since the run command never got
+  // far enough to reach the code that picks the stage back up.
+  const existing = tryLoadMeta(repoRoot, feature);
+  if (existing) {
+    const branchNow = currentBranch(repoRoot);
+    if (existing.branch !== branchNow) {
+      // Resuming on a different branch would quietly review and commit the
+      // wrong tree, so this one is still an error — but it says what to do.
+      throw new Error(
+        `feature "${feature}" เริ่มไว้บน branch "${existing.branch}" แต่ตอนนี้อยู่บน "${branchNow}"\n` +
+          `  สลับกลับด้วย "git checkout ${existing.branch}" แล้วรันใหม่ หรือถ้าตั้งใจเริ่มใหม่ให้ "pmctl clean ${feature}" ก่อน`
+      );
+    }
+    // Keep the original ClickUp ref unless this run supplies a new one.
+    return clickupTaskId && clickupTaskId !== existing.clickupTaskId
+      ? writeMeta(repoRoot, feature, { ...existing, clickupTaskId })
+      : existing;
+  }
   const branch = currentBranch(repoRoot);
   const meta: Meta = {
     feature,
