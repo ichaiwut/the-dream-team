@@ -22,7 +22,23 @@ const CLI_ENTRY = path.join(__dirname, "cli.js");
 function fillTemplate(template: string, vars: Record<string, string>): string {
   let out = template;
   for (const [key, value] of Object.entries(vars)) {
+    if (typeof value !== "string") {
+      // A var referenced in a template but missing from buildVars used to
+      // fail in two silent ways at once: `{{X}}` survived into the role
+      // text an agent is handed, and `${vars.X}` elsewhere rendered the
+      // string "undefined" into its prompt. Both produce an agent
+      // confidently told to read a file called "undefined", which looks
+      // like the agent ignoring instructions rather than a typo here.
+      throw new Error(`fillTemplate: ตัวแปร ${key} ไม่มีค่า (ต้องเพิ่มใน buildVars)`);
+    }
     out = out.split(`{{${key}}}`).join(value);
+  }
+  const leftover = [...new Set(out.match(/\{\{[A-Z_][A-Z0-9_]*\}\}/g) ?? [])];
+  if (leftover.length > 0) {
+    throw new Error(
+      `fillTemplate: เหลือ placeholder ที่ไม่มีใครแทนค่า: ${leftover.join(", ")} — ` +
+        `เพิ่มตัวแปรนี้ใน buildVars() หรือแก้ชื่อใน template ให้ตรง`
+    );
   }
   return out;
 }
@@ -35,6 +51,7 @@ function buildVars(repoRoot: string, meta: Meta): Record<string, string> {
     ANSWERS_PATH: path.join(dir, FILES.answers),
     DEV_SUMMARY_PATH: path.join(dir, FILES.devSummary),
     PO_BRIEF_PATH: path.join(dir, FILES.poBrief),
+    PO_MESSAGES_PATH: path.join(dir, FILES.poMessages),
     // Concrete, runnable command for appending a log line — see the
     // log-append subcommand in src/cli.ts for why PM must not hand-encode
     // the JSON itself.
@@ -162,7 +179,7 @@ export type PmPhase = "initial" | "dev" | "reviewer" | "tester" | "final" | "ful
  */
 const PHASE_INSTRUCTION: Record<Exclude<PmPhase, "fullRunNoGate">, string> = {
   initial:
-    `ก่อนอื่นใช้ Read tool เช็คไฟล์ po-brief.md (path อยู่ใน role ของคุณ) — ถ้ามีและไม่ว่าง นั่นคือสิ่งที่ PO พิมพ์สั่งไว้เอง ` +
+    `ก่อนอื่นใช้ Read tool เช็คไฟล์ po-brief.md และ po-messages.md (path อยู่ใน role ของคุณ) — ถ้ามีและไม่ว่าง นั่นคือสิ่งที่ PO พิมพ์สั่งไว้เอง ` +
     `ก่อนเริ่มงาน ให้ถือเป็นคำสั่งที่มีน้ำหนักเหนือการตีความ spec ของคุณเอง แล้วค่อยทำตามบทบาท PM ` +
     `เฉพาะขั้นตอน 0-1 เท่านั้น (ดึง spec จาก ClickUp เขียน spec.md -> วางแผน -> เขียน plan.md) ` +
     `แล้วหยุดทันที รอ PO อนุมัติ ห้ามสั่ง Dev ในรอบนี้เด็ดขาด`,
@@ -213,9 +230,12 @@ function buildInitialPrompt(phase: PmPhase, clickupRef: string, vars: Record<str
       ? ""
       : `spec.md (${vars.SPEC_PATH}) และ plan.md (${vars.PLAN_PATH}) มีอยู่แล้วจากรอบก่อนหน้า ` +
         `และ PO อนุมัติให้ทำขั้นตอนนี้ต่อแล้ว **ข้ามขั้นตอน 0 และ 1 ไปเลย** อย่าไปเขียน spec.md หรือ plan.md ใหม่ซ้ำ ` +
-        `ก่อนอื่น ใช้ Read tool เช็คไฟล์ ${vars.ANSWERS_PATH} — ถ้ามีอยู่และไม่ว่าง นั่นคือคำตอบที่ PO พิมพ์ตอบคำถามของคุณ ` +
-        `ที่ gate ล่าสุด ให้เพิ่ม section "## คำตอบจาก PO" ต่อท้าย plan.md แล้วนำคำตอบไปใช้ในคำสั่งที่จะส่งต่อในรอบนี้ ` +
-        `(ถ้าไม่มีไฟล์นี้หรือว่าง แปลว่า PO อนุมัติโดยไม่ได้ตอบอะไรเพิ่ม ให้ทำต่อตาม plan.md เดิม) `;
+        `ก่อนอื่น ใช้ Read tool เช็คสองไฟล์นี้เสมอ: ` +
+        `(1) ${vars.PO_MESSAGES_PATH} — ข้อความที่ PO พิมพ์สั่งระหว่างทาง ทุกข้อถือว่ายังมีผลอยู่ ` +
+        `ข้อความใหม่กว่าชนะถ้าขัดกันเอง และมีน้ำหนักเหนือการตีความ spec ของคุณเอง ` +
+        `(2) ${vars.ANSWERS_PATH} — คำตอบที่ PO พิมพ์ตอบคำถามของคุณที่ gate ล่าสุด ` +
+        `ให้เพิ่ม section "## คำตอบจาก PO" ต่อท้าย plan.md แล้วนำไปใช้ในคำสั่งที่จะส่งต่อในรอบนี้ ` +
+        `(ไฟล์ไหนไม่มีหรือว่าง แปลว่าไม่มีอะไรเพิ่มจากทางนั้น ทำต่อตาม plan.md เดิมได้) `;
 
   return (
     header +

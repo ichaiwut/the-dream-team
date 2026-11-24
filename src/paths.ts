@@ -38,6 +38,13 @@ export const FILES = {
   // in the PO's head rather than in the ClickUp ticket. Absent when they
   // had nothing to add, which is a normal thing to have nothing of.
   poBrief: "po-brief.md",
+  // Messages the PO typed while the run was in progress. Append-only and
+  // timestamped: PM reads the whole file at the start of every stage and
+  // treats it as standing instructions, so a message is never "delivered"
+  // once and lost. It cannot reach the invocation already running — that's
+  // a headless `claude -p` with no stdin to interrupt — so the file is how
+  // "I want to say something now" becomes "PM acts on it next stage".
+  poMessages: "po-messages.md",
   pmSession: "pm-session.log",
   devSession: "dev-session.log",
   reviewerSession: "reviewer-session.log",

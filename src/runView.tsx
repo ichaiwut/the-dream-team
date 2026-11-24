@@ -282,6 +282,31 @@ function determineResumePhase(repoRoot: string, feature: string): ResumeDecision
   return next === "done" ? "alreadyDone" : next;
 }
 
+/**
+ * A file that legitimately may not exist. Returns "" so the report drops
+ * the section rather than printing a "not found" notice for something the
+ * PO simply never wrote.
+ */
+function readOptionalFile(repoRoot: string, feature: string, key: "poBrief" | "poMessages"): string {
+  try {
+    const file = featureFile(repoRoot, feature, key);
+    return fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
+  } catch {
+    return "";
+  }
+}
+
+/** Messages already in the thread, counted by their timestamp headings. */
+function countPoMessages(repoRoot: string, feature: string): number {
+  try {
+    const file = featureFile(repoRoot, feature, "poMessages");
+    if (!fs.existsSync(file)) return 0;
+    return (fs.readFileSync(file, "utf8").match(/^##\s/gm) ?? []).length;
+  } catch {
+    return 0;
+  }
+}
+
 /** Heading the stage's own content gets, in its artifact and on screen. */
 const STAGE_BODY_HEADING: Record<Gate["source"], string> = {
   plan: "เนื้อหา plan",
@@ -461,14 +486,20 @@ function App({
   // written to answers.md for the post-approval PM invocation to read (see
   // buildInitialPrompt's continueAfterApproval branch in src/agents.ts).
   /**
-   * The full-screen text box, and what the typed text is for. Two moments
-   * in a run need the PO to write something rather than press a key:
+   * The full-screen text box, and what the typed text is for. Three
+   * moments in a run need the PO to write rather than press a key:
    * "brief" before anything starts (what PM should know that the ClickUp
-   * ticket doesn't say), and "answer" at a gate (replying to PM's open
-   * questions). Same box, same keys, different destination file.
+   * ticket doesn't say), "answer" at a gate (replying to PM's open
+   * questions), and "message" at any point at all — the PO noticing
+   * something mid-stage and wanting to say so without waiting for the
+   * next gate to come around. Same box, same keys, different destination.
    */
-  const [textEntry, setTextEntry] = useState<"brief" | "answer" | null>(null);
+  const [textEntry, setTextEntry] = useState<"brief" | "answer" | "message" | null>(null);
   const [entryText, setEntryText] = useState("");
+  // How many messages the PO has sent this session, so the panel can show
+  // that they landed somewhere. Seeded from the file so a resumed run
+  // doesn't claim the earlier ones never happened.
+  const [messageCount, setMessageCount] = useState<number>(() => countPoMessages(repoRoot, meta.feature));
   // Scrollback position in the PM transcript: null means "live" (pinned to
   // the newest output, the original behaviour), a number is the index of the
   // first visible wrapped line. The panel kept MAX_LINES of history all
@@ -720,6 +751,8 @@ function App({
           { heading: "สรุปงานจาก Dev", markdown: readStageMarkdown(repoRoot, meta.feature, "devSummary") },
           { heading: "ผลตรวจโค้ดจาก Reviewer", markdown: readStageMarkdown(repoRoot, meta.feature, "review") },
           { heading: "ผลทดสอบจาก Tester", markdown: readStageMarkdown(repoRoot, meta.feature, "report") },
+          { heading: "ข้อสั่งการจาก PO ก่อนเริ่มงาน", markdown: readOptionalFile(repoRoot, meta.feature, "poBrief") },
+          { heading: "ข้อความจาก PO ระหว่างทาง", markdown: readOptionalFile(repoRoot, meta.feature, "poMessages") },
           { heading: "ต้นทุนและ context ของแต่ละ session", markdown: buildStatsMarkdown(repoRoot, meta.feature) },
         ],
         log: freshLog,
@@ -838,10 +871,11 @@ function App({
   useInput((input, key) => {
     if (textEntry) {
       if (key.ctrl && input === "c") {
-        if (textEntry === "answer") {
+        if (textEntry === "answer" || textEntry === "message") {
           // Cancel just the box, not the whole run — easy to fat-finger
           // mid-typing, and nothing is written until Esc anyway.
           setTextEntry(null);
+          setEntryText("");
         } else {
           // At the brief there is no run yet to go back to, so Ctrl+C
           // means what it means everywhere else: quit.
@@ -853,24 +887,39 @@ function App({
       }
       if (key.escape) {
         const trimmed = entryText.trim();
+        const kind = textEntry;
         if (trimmed) {
           try {
-            fs.writeFileSync(
-              featureFile(repoRoot, meta.feature, textEntry === "brief" ? "poBrief" : "answers"),
-              trimmed + "\n",
-              "utf8"
-            );
+            if (kind === "message") {
+              // Appended, not overwritten: this is a running thread the PO
+              // adds to, and PM re-reads all of it at every stage.
+              fs.appendFileSync(
+                featureFile(repoRoot, meta.feature, "poMessages"),
+                `\n## ${new Date().toLocaleString("th-TH")}\n${trimmed}\n`,
+                "utf8"
+              );
+              setMessageCount((n) => n + 1);
+            } else {
+              fs.writeFileSync(
+                featureFile(repoRoot, meta.feature, kind === "brief" ? "poBrief" : "answers"),
+                trimmed + "\n",
+                "utf8"
+              );
+            }
           } catch {
             // Best-effort — if this fails PM just proceeds without it,
             // same as if the PO had typed nothing.
           }
         }
-        const kind = textEntry;
         setTextEntry(null);
-        // Empty text is a deliberate "nothing to add", not a cancel: both
-        // paths continue, they just continue with no file written.
+        setEntryText("");
+        // Empty text is a deliberate "nothing to add", not a cancel: the
+        // brief and answer paths continue either way, just with no file.
+        // A message never advances anything — the run carries on exactly
+        // where it was, which is the point of being able to send one at
+        // any time.
         if (kind === "brief") startPhase("initial");
-        else approveGate();
+        else if (kind === "answer") approveGate();
         return;
       }
       if (key.return) {
@@ -897,6 +946,9 @@ function App({
       if (input === "a") {
         setEntryText("");
         setTextEntry("answer");
+      } else if (input === "m") {
+        setEntryText("");
+        setTextEntry("message");
       } else if (input === "y" || key.return) {
         approveGate();
       } else if (input === "n") {
@@ -938,6 +990,11 @@ function App({
       else if (input === "G") setPmScroll(null); // the bottom *is* live
       return;
     }
+    if (input === "m") {
+      setEntryText("");
+      setTextEntry("message");
+      return;
+    }
     if (input === "v" && lastArtifact) {
       openInBrowser(lastArtifact.path);
       return;
@@ -957,13 +1014,23 @@ function App({
   if (textEntry) {
     const entryLines = entryText.length === 0 ? [""] : entryText.split("\n");
     const isBrief = textEntry === "brief";
+    const isMessage = textEntry === "message";
+    // When PM will actually see it. A running invocation is a headless
+    // `claude -p` with no stdin to interrupt, so a message cannot reach
+    // the stage already in flight — saying so here is the difference
+    // between a queue and a chat box that quietly does nothing.
+    const deliveryNote = runningPhase
+      ? `ตอนนี้กำลังรัน "${PHASE_LABEL[runningPhase.phase]}" อยู่ — แทรกกลางคันไม่ได้ PM จะอ่านตอนเริ่มขั้นตอนถัดไป`
+      : awaitingApproval
+        ? "PM จะอ่านทันทีที่คุณกด y อนุมัติให้ทำขั้นตอนต่อไป"
+        : "PM จะอ่านตอนเริ่มขั้นตอนถัดไป";
     return (
       <Box flexDirection="column" width={columns} height={rows}>
         <Box>
           <Text bold>pmctl run — {meta.feature}</Text>
           <Text dimColor>
             {" "}
-            — {isBrief ? "บอก PM ก่อนเริ่มงาน" : "พิมพ์คำตอบให้ PM ก่อนอนุมัติ"}
+            — {isMessage ? "พิมพ์บอก PM" : isBrief ? "บอก PM ก่อนเริ่มงาน" : "พิมพ์คำตอบให้ PM ก่อนอนุมัติ"}
           </Text>
         </Box>
         <Box
@@ -973,7 +1040,19 @@ function App({
           borderStyle="single"
           paddingX={1}
         >
-          {isBrief ? (
+          {isMessage ? (
+            <>
+              <Text bold color="yellow">
+                พิมพ์บอก PM (ส่งได้ตลอดเวลา ไม่กระทบขั้นตอนที่กำลังรันอยู่)
+              </Text>
+              <Text color="cyan">{deliveryNote}</Text>
+              <Text dimColor>
+                ทุกข้อความถูกเก็บสะสมไว้และ PM อ่านใหม่ทุกครั้งที่เริ่มขั้นตอน ถือเป็นคำสั่งที่ยังมีผลอยู่ ไม่ใช่อ่านครั้งเดียวทิ้ง —
+                ถ้าขัดกับข้อความเก่า อันใหม่ชนะ
+              </Text>
+              <Text dimColor>Enter ขึ้นบรรทัดใหม่ · Esc ส่ง · Ctrl+C ยกเลิก</Text>
+            </>
+          ) : isBrief ? (
             <>
               <Text bold color="yellow">
                 มีอะไรอยากบอก PM ก่อนเริ่มไหม? (ไม่มีก็กด Esc ข้ามได้เลย)
@@ -1024,7 +1103,8 @@ function App({
           paddingX={1}
         >
           <Text bold color="yellow">
-            {activeGate?.question ?? "อนุมัติให้ทำต่อไหม"} — y/Enter อนุมัติ · a พิมพ์คำตอบให้ PM ก่อนอนุมัติ · n หยุดไว้ก่อน
+            {activeGate?.question ?? "อนุมัติให้ทำต่อไหม"} — y/Enter อนุมัติ · a พิมพ์คำตอบให้ PM ก่อนอนุมัติ · m พิมพ์บอก PM
+            เฉยๆ · n หยุดไว้ก่อน
           </Text>
           <Text dimColor>
             ↑/↓ หรือ j/k เลื่อน · space/f หน้าถัดไป · b หน้าก่อนหน้า · g/G บนสุด/ล่างสุด
@@ -1108,10 +1188,10 @@ function App({
   const pmFirstVisible = pmScroll === null ? Math.max(0, pmWrapped.length - visibleRows) : Math.min(pmScroll, pmMaxScroll);
   const pmVisible = pmWrapped.slice(pmFirstVisible, pmFirstVisible + visibleRows);
   const footerHint = done
-    ? ", q/Enter ออก"
+    ? ", q/Enter ออก, m พิมพ์บอก PM"
     : lastArtifact
-      ? ", [ เลื่อนดูย้อนหลัง, v เปิดเอกสารที่เพิ่งอนุมัติ"
-      : ", [ เลื่อนดูย้อนหลัง";
+      ? ", m พิมพ์บอก PM, [ เลื่อนดูย้อนหลัง, v เปิดเอกสารที่เพิ่งอนุมัติ"
+      : ", m พิมพ์บอก PM, [ เลื่อนดูย้อนหลัง";
   // Recomputed on every render, and the log poll re-renders once a second,
   // so these tick on their own without a second timer.
   const runAge = checklist.startedAt ? formatAge(checklist.startedAt) : null;
@@ -1204,6 +1284,9 @@ function App({
                 ถ้าค้าง: Ctrl+C แล้วรันใหม่ด้วย --permission-mode bypassPermissions (กลับมาที่ gate เดิม ไม่เสียงานที่ทำไปแล้ว)
               </Text>
             </Box>
+          )}
+          {messageCount > 0 && (
+            <Text color="cyan">✉ ส่งข้อความถึง PM แล้ว {messageCount} ข้อความ (PM อ่านใหม่ทุกต้นขั้นตอน)</Text>
           )}
           {lastArtifact && !awaitingApproval && (
             <Box marginTop={1} flexDirection="column">
