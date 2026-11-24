@@ -28,6 +28,7 @@ import {
   hasUnresolvedAgentQuestions,
 } from "./planHtml.js";
 import { notify } from "./notify.js";
+import { collectRunDiff } from "./gitDiff.js";
 import {
   listPendingChanges,
   commitWork,
@@ -610,6 +611,10 @@ function App({
         // Everything past the plan is a mid-run checkpoint, where "how did
         // we get here" is part of the decision.
         withTimeline: gate.source !== "plan",
+        // From the Dev gate onward there is code to look at, and the diff
+        // is what's actually being approved — the agent's write-up is
+        // commentary on it. The plan gate has nothing to diff yet.
+        diff: gate.source === "plan" ? null : collectRunDiff(meta.worktreePath, repoRoot, meta.feature),
       });
       fs.writeFileSync(htmlPath, html, "utf8");
       setPlanHtmlPath(htmlPath);
@@ -768,6 +773,10 @@ function App({
     // known moment instead of an LLM composing git commands mid-run —
     // and so the PO gets to see what it would contain before approving.
     // Branches stay the PO's own business and nothing is pushed.
+    // Must happen before the commit: once committed there is nothing left
+    // in the working tree to diff against HEAD.
+    const runDiff = collectRunDiff(meta.worktreePath, repoRoot, meta.feature);
+
     let commit: CommitResult | null = null;
     if (commitOnFinish && exitCode === 0) {
       const message = readCommitMessage(repoRoot, meta.feature, clickupRef);
@@ -794,6 +803,9 @@ function App({
         ],
         log: freshLog,
         generatedAt: new Date().toLocaleString("th-TH"),
+        // Collected before the commit below runs, while the changes are
+        // still uncommitted and therefore still a diff against HEAD.
+        diff: runDiff,
       });
       fs.writeFileSync(htmlPath, html, "utf8");
       setFinalHtmlPath(htmlPath);

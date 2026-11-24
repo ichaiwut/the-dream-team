@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { LogEntry } from "./log.js";
 import { computeChecklist } from "./pipeline.js";
+import type { RunDiff } from "./gitDiff.js";
 
 function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -310,6 +311,27 @@ const STYLE = `
     background: #1a1f29; border: 1px solid #333a45; border-radius: 8px;
     padding: 12px 14px; overflow-x: auto; font-size: 0.88rem;
   }
+  .d-file { border: 1px solid #2a2f37; border-radius: 8px; margin: 16px 0; overflow: hidden; }
+  .d-head {
+    background: #161a20; padding: 8px 12px; display: flex; align-items: center; gap: 10px;
+    border-bottom: 1px solid #2a2f37; font-size: 0.92rem;
+  }
+  .d-head code { background: none; color: #cfd6e4; font-weight: 600; }
+  .d-new { background: #1d3a26; color: #8be3ab; border-radius: 4px; padding: 1px 7px; font-size: 0.78rem; }
+  .d-stat { margin-left: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.82rem; }
+  .d-plus { color: #8be3ab; }
+  .d-minus { color: #ff9b9b; }
+  .d-body {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.82rem; line-height: 1.5; overflow-x: auto; background: #0e1116;
+  }
+  .d-body > div { padding: 0 12px; white-space: pre; }
+  .d-add { background: #10291b; color: #a9f0c4; }
+  .d-del { background: #2e1417; color: #ffb3b3; }
+  .d-hunk { background: #141b26; color: #7f9ac2; }
+  .d-ctx { color: #8b93a1; }
+  .d-cut { padding: 6px 12px; color: #9aa0a6; font-size: 0.82rem; background: #0e1116; }
+  .d-note { color: #9aa0a6; font-size: 0.9rem; }
   table.timeline { font-size: 0.86rem; }
   table.timeline .tl-when { white-space: nowrap; color: #9aa0a6; width: 1%; }
   table.timeline .tl-actor { color: #7cc7ff; width: 1%; }
@@ -376,6 +398,8 @@ export function buildStageHtml(opts: {
   generatedAt: string;
   /** Rendered after the body — the timeline of what's happened so far. */
   withTimeline?: boolean;
+  /** Rendered above the body — the actual code change under review. */
+  diff?: RunDiff | null;
 }): string {
   return buildPlanHtml({
     feature: opts.feature,
@@ -386,6 +410,7 @@ export function buildStageHtml(opts: {
     heading: opts.heading,
     bodyHeading: opts.bodyHeading,
     withTimeline: opts.withTimeline,
+    diff: opts.diff,
   });
 }
 
@@ -425,6 +450,7 @@ export function buildFinalReportHtml(opts: {
   sections: { heading: string; markdown: string }[];
   log: LogEntry[];
   generatedAt: string;
+  diff?: RunDiff | null;
 }): string {
   const { feature, clickupRef, port, sections, log, generatedAt } = opts;
   const body = sections
@@ -452,6 +478,9 @@ ${MERMAID_SCRIPT}
     <h2>สถานะ pipeline</h2>
     ${buildFlowChart(log)}
 
+    <h2>โค้ดที่เปลี่ยนจริง (git diff)</h2>
+    ${buildDiffHtml(opts.diff ?? null)}
+
     ${body}
 
     <h2>ไทม์ไลน์ทั้งหมด</h2>
@@ -459,6 +488,52 @@ ${MERMAID_SCRIPT}
   </div>
 </body>
 </html>`;
+}
+
+/**
+ * Renders a unified diff the way a diff is meant to look: one block per
+ * file, added lines green, removed red, hunk headers set apart. Dev's prose
+ * account of its own changes is a summary of this written by the thing
+ * under review — fine as context, useless for actually checking the work.
+ */
+export function buildDiffHtml(diff: RunDiff | null): string {
+  if (!diff || (diff.files.length === 0 && diff.binaryOrUnreadable.length === 0)) {
+    return "<p>(ไม่มีไฟล์ที่เปลี่ยนจากรอบนี้)</p>";
+  }
+  const blocks = diff.files
+    .map((file) => {
+      const rows = file.lines
+        .map((line) => {
+          const cls = line.startsWith("@@")
+            ? "d-hunk"
+            : line.startsWith("+")
+              ? "d-add"
+              : line.startsWith("-")
+                ? "d-del"
+                : "d-ctx";
+          return `<div class="${cls}">${escapeHtml(line === "" ? " " : line)}</div>`;
+        })
+        .join("");
+      const badge = file.isNew ? '<span class="d-new">ไฟล์ใหม่</span>' : "";
+      const cut = file.truncated
+        ? '<div class="d-cut">… ตัดส่วนที่เหลือออก (ไฟล์ยาวเกิน) — ดูเต็มๆ ด้วย git diff</div>'
+        : "";
+      return (
+        `<div class="d-file"><div class="d-head"><code>${escapeHtml(file.path)}</code>${badge}` +
+        `<span class="d-stat"><span class="d-plus">+${file.added}</span> <span class="d-minus">−${file.removed}</span></span></div>` +
+        `<div class="d-body">${rows}</div>${cut}</div>`
+      );
+    })
+    .join("\n");
+
+  const binary =
+    diff.binaryOrUnreadable.length > 0
+      ? `<p class="d-note">ไฟล์ที่แสดง diff เป็นข้อความไม่ได้ (binary หรืออ่านไม่ได้): ${diff.binaryOrUnreadable
+          .map((f) => `<code>${escapeHtml(f)}</code>`)
+          .join(", ")}</p>`
+      : "";
+  const cut = diff.truncated ? '<p class="d-note">diff ยาวเกินกว่าจะแสดงทั้งหมดในหน้านี้ — ใช้ <code>git diff</code> ดูฉบับเต็ม</p>' : "";
+  return blocks + binary + cut;
 }
 
 export function buildPlanHtml(opts: {
@@ -470,6 +545,7 @@ export function buildPlanHtml(opts: {
   heading?: string;
   bodyHeading?: string;
   withTimeline?: boolean;
+  diff?: RunDiff | null;
 }): string {
   const { feature, clickupRef, planMarkdown, log, generatedAt } = opts;
   const heading = opts.heading ?? "Plan";
@@ -477,6 +553,9 @@ export function buildPlanHtml(opts: {
   const flowChart = buildFlowChart(log);
   const planBody = mdToHtml(planMarkdown);
   const timeline = opts.withTimeline ? `<h2>ไทม์ไลน์ทั้งหมด</h2>${buildTimeline(log)}` : "";
+  // The diff goes above the agent's own write-up: what changed is the
+  // thing being approved, the prose is commentary on it.
+  const diffSection = opts.diff ? `<h2>โค้ดที่เปลี่ยนจริง (git diff)</h2>${buildDiffHtml(opts.diff)}` : "";
   const qaBanner = hasOpenQuestions(planMarkdown)
     ? `<div class="banner qa-banner">⚠ PM มีคำถามถึง PO ใน plan นี้ (ดูหัวข้อ "คำถามถึง PO" ด้านล่าง) — ` +
       `หน้านี้อ่านอย่างเดียว ตอบตรงนี้ไม่ได้ กลับไปที่เทอร์มินัลที่รัน <code>pmctl run</code> แล้วกด <code>a</code> ` +
@@ -500,6 +579,8 @@ ${MERMAID_SCRIPT}
 
     <h2>สถานะ pipeline</h2>
     ${flowChart}
+
+    ${diffSection}
 
     <h2>${escapeHtml(bodyHeading)}</h2>
     <div class="plan-body">
