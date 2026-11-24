@@ -315,6 +315,52 @@ function describeCommitMarkdown(commit: CommitResult | null, enabled: boolean): 
   return `**commit ไม่สำเร็จ** — งานยังอยู่ใน working tree ครบ ไม่ได้หายไปไหน\n\n\`\`\`\n${commit.error ?? ""}\n\`\`\``;
 }
 
+/** Which agent produced the document a gate shows. */
+const GATE_AGENT: Record<Gate["source"], SubAgent | null> = {
+  plan: null,
+  devSummary: "dev",
+  review: "reviewer",
+  report: "tester",
+};
+
+const AGENT_PROMPT_FILE: Record<SubAgent, "devPrompt" | "reviewerPrompt" | "testerPrompt"> = {
+  dev: "devPrompt",
+  reviewer: "reviewerPrompt",
+  tester: "testerPrompt",
+};
+
+/**
+ * The exact prompt PM sent this agent, if PM wrote it down as instructed.
+ * Falls back to null rather than to the logged summary: a paraphrase
+ * presented as the prompt is worse than no prompt, because the whole point
+ * is telling "the agent disobeyed" apart from "PM asked for the wrong
+ * thing", and only the real text settles that.
+ */
+function readAgentPrompt(repoRoot: string, feature: string, agent: SubAgent): string | null {
+  try {
+    const file = featureFile(repoRoot, feature, AGENT_PROMPT_FILE[agent]);
+    if (!fs.existsSync(file)) return null;
+    const text = fs.readFileSync(file, "utf8").trim();
+    return text || null;
+  } catch {
+    return null;
+  }
+}
+
+/** The PM-to-agent exchange for a gate page: what was asked, what came back. */
+function buildExchangeMarkdown(repoRoot: string, feature: string, agent: SubAgent): string {
+  const prompt = readAgentPrompt(repoRoot, feature, agent);
+  const reply = readSubAgentLines(repoRoot, feature, agent).join("\n").trim();
+  if (!prompt && !reply) return "";
+  const promptPart = prompt
+    ? `### PM สั่งว่า\n\n\`\`\`\n${prompt}\n\`\`\`\n`
+    : `### PM สั่งว่า\n\n(PM ไม่ได้บันทึก prompt ไว้ — ดู PM SESSION ในเทอร์มินัลหรือ pm-session.log)\n`;
+  const replyPart = reply
+    ? `### ${agent} ตอบกลับ\n\n\`\`\`\n${reply}\n\`\`\`\n`
+    : `### ${agent} ตอบกลับ\n\n(ยังไม่มีคำตอบ)\n`;
+  return `${promptPart}\n${replyPart}`;
+}
+
 /** Messages already in the thread, counted by their timestamp headings. */
 function countPoMessages(repoRoot: string, feature: string): number {
   try {
@@ -615,6 +661,11 @@ function App({
         // is what's actually being approved — the agent's write-up is
         // commentary on it. The plan gate has nothing to diff yet.
         diff: gate.source === "plan" ? null : collectRunDiff(meta.worktreePath, repoRoot, meta.feature),
+        // Which agent's exchange belongs on this page follows from which
+        // stage just finished.
+        exchange: GATE_AGENT[gate.source]
+          ? buildExchangeMarkdown(repoRoot, meta.feature, GATE_AGENT[gate.source]!)
+          : "",
       });
       fs.writeFileSync(htmlPath, html, "utf8");
       setPlanHtmlPath(htmlPath);
@@ -800,6 +851,16 @@ function App({
           { heading: "ข้อความจาก PO ระหว่างทาง", markdown: readOptionalFile(repoRoot, meta.feature, "poMessages") },
           { heading: "ต้นทุนและ context ของแต่ละ session", markdown: buildStatsMarkdown(repoRoot, meta.feature) },
           { heading: "Commit", markdown: describeCommitMarkdown(commit, commitOnFinish) },
+          {
+            heading: "บทสนทนา PM ↔ agent ทั้งหมด",
+            markdown: (["dev", "reviewer", "tester"] as SubAgent[])
+              .map((a) => {
+                const ex = buildExchangeMarkdown(repoRoot, meta.feature, a);
+                return ex ? `## ${a}\n\n${ex}` : "";
+              })
+              .filter(Boolean)
+              .join("\n\n"),
+          },
         ],
         log: freshLog,
         generatedAt: new Date().toLocaleString("th-TH"),
@@ -1267,7 +1328,8 @@ function App({
   // prompt inside its own bash call, which pmctl never sees — but it is
   // required to log what it dispatched, and that line is written through
   // `pmctl log-append` now, so it arrives intact.
-  const subBrief = subAgent ? briefForAgent(log, subAgent) : null;
+  const subPrompt = subAgent ? readAgentPrompt(repoRoot, meta.feature, subAgent) : null;
+  const subBrief = subPrompt ?? (subAgent ? briefForAgent(log, subAgent) : null);
   const subContextHeavy =
     subStats?.contextTokens !== undefined && subStats.contextTokens > ASSUMED_CONTEXT_WINDOW * 0.75;
 
@@ -1487,7 +1549,7 @@ function App({
               // panel is a wall of reply text with no statement of the
               // task it's replying to.
               <Box flexDirection="column">
-                <Text dimColor>โจทย์:</Text>
+                <Text dimColor>{subPrompt ? "PM สั่งว่า (prompt จริง):" : "โจทย์ (สรุปจาก log — PM ยังไม่ได้บันทึก prompt):"}</Text>
                 {wrapLine(subBrief, Math.max(10, subWidth - PANEL_INNER_PADDING))
                   .slice(0, 3)
                   .map((l, i) => (

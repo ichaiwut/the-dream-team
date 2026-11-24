@@ -53,6 +53,9 @@ function buildVars(repoRoot: string, meta: Meta): Record<string, string> {
     PO_BRIEF_PATH: path.join(dir, FILES.poBrief),
     PO_MESSAGES_PATH: path.join(dir, FILES.poMessages),
     COMMIT_MESSAGE_PATH: path.join(dir, FILES.commitMessage),
+    DEV_PROMPT_PATH: path.join(dir, FILES.devPrompt),
+    REVIEWER_PROMPT_PATH: path.join(dir, FILES.reviewerPrompt),
+    TESTER_PROMPT_PATH: path.join(dir, FILES.testerPrompt),
     // Concrete, runnable command for appending a log line — see the
     // log-append subcommand in src/cli.ts for why PM must not hand-encode
     // the JSON itself.

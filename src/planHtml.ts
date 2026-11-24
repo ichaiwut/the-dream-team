@@ -400,6 +400,8 @@ export function buildStageHtml(opts: {
   withTimeline?: boolean;
   /** Rendered above the body — the actual code change under review. */
   diff?: RunDiff | null;
+  /** The PM-to-agent exchange behind this stage, as markdown. */
+  exchange?: string;
 }): string {
   return buildPlanHtml({
     feature: opts.feature,
@@ -411,6 +413,7 @@ export function buildStageHtml(opts: {
     bodyHeading: opts.bodyHeading,
     withTimeline: opts.withTimeline,
     diff: opts.diff,
+    exchange: opts.exchange,
   });
 }
 
@@ -546,6 +549,7 @@ export function buildPlanHtml(opts: {
   bodyHeading?: string;
   withTimeline?: boolean;
   diff?: RunDiff | null;
+  exchange?: string;
 }): string {
   const { feature, clickupRef, planMarkdown, log, generatedAt } = opts;
   const heading = opts.heading ?? "Plan";
@@ -556,6 +560,12 @@ export function buildPlanHtml(opts: {
   // The diff goes above the agent's own write-up: what changed is the
   // thing being approved, the prose is commentary on it.
   const diffSection = opts.diff ? `<h2>โค้ดที่เปลี่ยนจริง (git diff)</h2>${buildDiffHtml(opts.diff)}` : "";
+  // The exchange sits last: it's the evidence you go to when the diff or
+  // the write-up doesn't add up, not the first thing to read.
+  const exchangeSection =
+    opts.exchange && opts.exchange.trim() !== ""
+      ? `<h2>บทสนทนา PM ↔ agent</h2><div class="plan-body">${mdToHtml(opts.exchange, 1)}</div>`
+      : "";
   const qaBanner = hasOpenQuestions(planMarkdown)
     ? `<div class="banner qa-banner">⚠ PM มีคำถามถึง PO ใน plan นี้ (ดูหัวข้อ "คำถามถึง PO" ด้านล่าง) — ` +
       `หน้านี้อ่านอย่างเดียว ตอบตรงนี้ไม่ได้ กลับไปที่เทอร์มินัลที่รัน <code>pmctl run</code> แล้วกด <code>a</code> ` +
@@ -586,6 +596,7 @@ ${MERMAID_SCRIPT}
     <div class="plan-body">
       ${planBody}
     </div>
+    ${exchangeSection}
     ${timeline}
   </div>
 </body>

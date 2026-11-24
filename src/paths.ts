@@ -52,6 +52,12 @@ export const FILES = {
   // Paths already dirty when the run started, so the final commit can tell
   // this run's work apart from whatever the PO had lying around.
   gitBaseline: "git-baseline.json",
+  // The exact prompt PM sends each sub-agent, written by PM just before
+  // dispatching. PM composes these inside its own bash call, so without a
+  // file the PO only ever sees the agent's reply — half a conversation.
+  devPrompt: "dev-prompt.md",
+  reviewerPrompt: "reviewer-prompt.md",
+  testerPrompt: "tester-prompt.md",
   pmSession: "pm-session.log",
   devSession: "dev-session.log",
   reviewerSession: "reviewer-session.log",
