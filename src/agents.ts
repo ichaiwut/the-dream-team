@@ -353,7 +353,7 @@ export function buildPmSessionPlan(
   // Dev/Reviewer/Tester can hang on an interactive Bash-approval prompt that
   // has no human attached to answer it (PM runs headless, via -p). See
   // src/claudeSettings.ts for why this is a guess, not a verified fix.
-  ensureClaudeBashAllowRule(meta.worktreePath);
+  ensureClaudeBashAllowRule(meta.worktreePath, CLI_ENTRY);
 
   const initialPrompt = buildInitialPrompt(phase, clickupRef, vars);
 

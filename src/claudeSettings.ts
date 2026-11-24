@@ -24,6 +24,30 @@ const SETTINGS_REL_PATH = path.join(".claude", "settings.local.json");
 // either way.
 const CLAUDE_BASH_ALLOW_RULE = "Bash(claude -p *)";
 
+/**
+ * The rest of what PM is required to run through Bash, and therefore the
+ * rest of what has to be allow-listed for a headless session to work.
+ *
+ * This list exists because of a real stall: PM was told to append log
+ * lines with `pmctl log-append` (so an LLM isn't hand-assembling JSON
+ * around Thai prose in bash), but nothing allow-listed that command. Every
+ * log call was refused with "This command requires approval", so PM could
+ * not log a single line — which pmctl reads as "the stage never happened".
+ * The run couldn't advance at all, and the cause was invisible until PM
+ * said so in its final message.
+ *
+ * `tee` is here for the same reason: PM pipes each sub-agent's output
+ * through `tee` into its session log, which is what the PO's panel reads.
+ *
+ * The CLI path is absolute and resolved at call time, so a checkout in a
+ * different directory gets a rule that matches its own binary. The
+ * wildcard goes after the path (what varies is the subcommand and its
+ * arguments), never before it.
+ */
+function requiredBashRules(cliEntry: string): string[] {
+  return [CLAUDE_BASH_ALLOW_RULE, `Bash(node ${cliEntry}:*)`, "Bash(tee:*)"];
+}
+
 // The old, overly-broad rule from the first version of this file. Safe to
 // actively remove (not just leave alongside the new one) because pmctl
 // itself is the only thing that ever wrote it — never a rule the PO set up
@@ -44,7 +68,7 @@ const SUPERSEDED_BROAD_RULE = "Bash(claude *)";
  * setup (some permission modes may not require it), not something that
  * should abort a run over.
  */
-export function ensureClaudeBashAllowRule(worktreePath: string): void {
+export function ensureClaudeBashAllowRule(worktreePath: string, cliEntry: string): void {
   const file = path.join(worktreePath, SETTINGS_REL_PATH);
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -64,9 +88,11 @@ export function ensureClaudeBashAllowRule(worktreePath: string): void {
       settings.permissions.allow.splice(broadIdx, 1);
       changed = true;
     }
-    if (!settings.permissions.allow.includes(CLAUDE_BASH_ALLOW_RULE)) {
-      settings.permissions.allow.push(CLAUDE_BASH_ALLOW_RULE);
-      changed = true;
+    for (const rule of requiredBashRules(cliEntry)) {
+      if (!settings.permissions.allow.includes(rule)) {
+        settings.permissions.allow.push(rule);
+        changed = true;
+      }
     }
     if (changed) {
       fs.writeFileSync(file, JSON.stringify(settings, null, 2) + "\n", "utf8");
