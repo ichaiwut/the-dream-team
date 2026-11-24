@@ -17,6 +17,7 @@ import {
   formatAge,
   openGate,
   finalDoneIndex,
+  isSkipStep,
   phaseAfterLog,
   type Gate,
 } from "./pipeline.js";
@@ -691,6 +692,32 @@ function App({
    * which is the whole reason the loop-back is a decision and not something
    * PM does by itself.
    */
+  /**
+   * Index of the newest skip instruction, or -1. Watermarked like gates so
+   * a skip from an earlier phase doesn't re-trigger.
+   */
+  function skipIndex(freshLog: LogEntry[]): number {
+    for (let i = freshLog.length - 1; i >= 0; i--) {
+      if (isSkipStep(freshLog[i].step)) return i;
+      if (freshLog[i].step.endsWith("_started")) return -1;
+    }
+    return -1;
+  }
+
+  /**
+   * Starts the stage that follows a skipped one. Returns false when the
+   * newest entry isn't a skip, so callers can fall through to their normal
+   * end-of-phase handling.
+   */
+  function advanceAfterSkip(freshLog: LogEntry[]): boolean {
+    if (skipIndex(freshLog) < gateWatermarkRef.current) return false;
+    const next = phaseAfterLog(freshLog);
+    if (next === "done") return false;
+    setLines((prev) => prev.concat("", `⊘ ข้ามขั้นตอนตามที่ PO สั่ง — ไปต่อที่ "${PHASE_LABEL[next]}"`));
+    startPhase(next);
+    return true;
+  }
+
   function approveGate() {
     const next = activeGate?.nextPhase ?? "dev";
     if (activeGate && planHtmlPath !== "") {
@@ -810,6 +837,10 @@ function App({
         showGate(parked.gate, freshLog);
         return;
       }
+      // The PO told PM to skip this stage, so there's nothing to approve —
+      // asking them to confirm skipping what they asked to skip would just
+      // be a keystroke tax. Carry straight on to the next stage.
+      if (exitCode === 0 && advanceAfterSkip(freshLog)) return;
       if (exitCode === 0 && finalDoneIndex(freshLog) >= gateWatermarkRef.current) {
         finishRun(freshLog, exitCode);
         return;
@@ -990,6 +1021,9 @@ function App({
         if (parked && parked.index >= gateWatermarkRef.current) {
           stopHere();
           showGate(parked.gate, freshLog);
+        } else if (skipIndex(freshLog) >= gateWatermarkRef.current) {
+          stopHere();
+          advanceAfterSkip(freshLog);
         } else if (finalAt >= gateWatermarkRef.current) {
           stopHere();
           finishRun(freshLog, 0);

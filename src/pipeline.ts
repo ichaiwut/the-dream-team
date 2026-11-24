@@ -105,12 +105,32 @@ export function phaseAfterLog(log: LogEntry[]): "dev" | "reviewer" | "tester" | 
   for (let i = log.length - 1; i >= 0; i--) {
     const step = log[i].step;
     if (step === "final_done") return "done";
-    if (step === "tester_started" || step === "tester_done") return step === "tester_done" ? "final" : "tester";
-    if (step === "reviewer_started" || step === "reviewer_done") return step === "reviewer_done" ? "tester" : "reviewer";
+    if (step === "tester_started" || step === "tester_done" || step === "tester_skipped") {
+      return step === "tester_started" ? "tester" : "final";
+    }
+    if (step === "reviewer_started" || step === "reviewer_done" || step === "reviewer_skipped") {
+      return step === "reviewer_started" ? "reviewer" : "tester";
+    }
     if (step === "dev_started" || step === "dev_done") return step === "dev_done" ? "reviewer" : "dev";
     if (step === "iteration") return "dev";
   }
   return "dev";
+}
+
+/**
+ * A stage the PO told PM to skip for this feature (in the brief or a
+ * message — never PM's own decision; see roles/pm.md). It advances the
+ * pipeline like a completed stage but opens no gate: the PO already made
+ * the call, so asking them to approve skipping the thing they asked to
+ * skip is just a keystroke tax.
+ */
+export const SKIP_STEPS: Record<string, "reviewer" | "tester"> = {
+  reviewer_skipped: "reviewer",
+  tester_skipped: "tester",
+};
+
+export function isSkipStep(step: string): boolean {
+  return step in SKIP_STEPS;
 }
 
 /**
@@ -153,7 +173,7 @@ export function finalDoneIndex(log: LogEntry[]): number {
 export interface ChecklistItem {
   id: string;
   label: string;
-  status: "done" | "current" | "pending";
+  status: "done" | "current" | "pending" | "skipped";
 }
 
 export interface Checklist {
@@ -209,6 +229,8 @@ export function computeChecklist(log: LogEntry[]): Checklist {
   // it back on an iteration) — i.e. when the step now showing as "current"
   // actually began, not when the run as a whole started.
   let currentSince: string | null = null;
+  // Which pipeline positions were satisfied by a skip rather than by work.
+  const skipped = new Set<string>();
 
   for (const entry of log) {
     if (entry.step === "iteration") {
@@ -221,10 +243,21 @@ export function computeChecklist(log: LogEntry[]): Checklist {
       needsAttention = true;
       continue;
     }
-    const idx = PIPELINE.findIndex((p) => p.id === entry.step);
+    // A skipped stage satisfies its own "*_done" position in the pipeline.
+    const effectiveStep = isSkipStep(entry.step)
+      ? `${SKIP_STEPS[entry.step]}_done`
+      : entry.step;
+    const idx = PIPELINE.findIndex((p) => p.id === effectiveStep);
     if (idx !== -1 && idx > pointer) {
       pointer = idx;
       currentSince = entry.ts;
+      if (isSkipStep(entry.step)) {
+        // Both rows for that stage: the dispatch never happened either, and
+        // a ticked "สั่ง Tester" above a skipped "Tester ตรวจสอบเสร็จ"
+        // claims a step that didn't occur.
+        skipped.add(effectiveStep);
+        skipped.add(`${SKIP_STEPS[entry.step]}_started`);
+      }
     }
   }
 
@@ -239,8 +272,13 @@ export function computeChecklist(log: LogEntry[]): Checklist {
   const currentPointer = Math.max(pointer, 0);
   const items: ChecklistItem[] = PIPELINE.map((p, i) => ({
     ...p,
-    status:
-      i < pointer
+    // A skipped stage reads as "ข้าม (PO สั่ง)" rather than a tick: it
+    // advanced the pipeline, but nothing was checked, and a checklist that
+    // can't tell those apart is worse than no checklist.
+    label: skipped.has(p.id) ? `${p.label} — ข้าม (PO สั่ง)` : p.label,
+    status: skipped.has(p.id)
+      ? "skipped"
+      : i < pointer
         ? "done"
         : i === currentPointer
           ? (i === PIPELINE.length - 1 ? "done" : "current")
@@ -260,11 +298,14 @@ export function computeChecklist(log: LogEntry[]): Checklist {
 export function checklistColor(status: ChecklistItem["status"]): string | undefined {
   if (status === "done") return "green";
   if (status === "current") return "yellow";
+  // Not green: nothing was verified here, and it shouldn't read as if it was.
+  if (status === "skipped") return "gray";
   return undefined;
 }
 
 export function checklistMark(status: ChecklistItem["status"]): string {
   if (status === "done") return "☑";
   if (status === "current") return "▶";
+  if (status === "skipped") return "⊘";
   return "☐";
 }
