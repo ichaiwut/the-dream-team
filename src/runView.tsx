@@ -1015,12 +1015,14 @@ function App({
     const entryLines = entryText.length === 0 ? [""] : entryText.split("\n");
     const isBrief = textEntry === "brief";
     const isMessage = textEntry === "message";
-    // When PM will actually see it. A running invocation is a headless
-    // `claude -p` with no stdin to interrupt, so a message cannot reach
-    // the stage already in flight — saying so here is the difference
-    // between a queue and a chat box that quietly does nothing.
+    // When PM will actually see it. Nothing here can reach a process
+    // already running — PM and its sub-agents are all headless `claude -p`
+    // with no stdin to interrupt — so this says when PM next gets control,
+    // which is the difference between a queue and a chat box that quietly
+    // does nothing. PM re-reads the thread as soon as a sub-agent returns,
+    // so mid-stage usually means sooner than the next gate.
     const deliveryNote = runningPhase
-      ? `ตอนนี้กำลังรัน "${PHASE_LABEL[runningPhase.phase]}" อยู่ — แทรกกลางคันไม่ได้ PM จะอ่านตอนเริ่มขั้นตอนถัดไป`
+      ? `ตอนนี้กำลังรัน "${PHASE_LABEL[runningPhase.phase]}" อยู่ — แทรกกลางคันไม่ได้ PM จะอ่านทันทีที่ได้ควบคุมกลับ (agent ที่รันอยู่ตอบกลับ หรือเริ่มขั้นตอนถัดไป)`
       : awaitingApproval
         ? "PM จะอ่านทันทีที่คุณกด y อนุมัติให้ทำขั้นตอนต่อไป"
         : "PM จะอ่านตอนเริ่มขั้นตอนถัดไป";
@@ -1047,8 +1049,12 @@ function App({
               </Text>
               <Text color="cyan">{deliveryNote}</Text>
               <Text dimColor>
-                ทุกข้อความถูกเก็บสะสมไว้และ PM อ่านใหม่ทุกครั้งที่เริ่มขั้นตอน ถือเป็นคำสั่งที่ยังมีผลอยู่ ไม่ใช่อ่านครั้งเดียวทิ้ง —
-                ถ้าขัดกับข้อความเก่า อันใหม่ชนะ
+                ส่งถึง PM เท่านั้น (Dev/Reviewer/Tester ไม่เห็น) ทุกข้อความเก็บสะสมไว้และ PM อ่านใหม่ทุกครั้งที่ได้ควบคุมกลับ
+                ถือเป็นคำสั่งที่ยังมีผลอยู่ ไม่ใช่อ่านครั้งเดียวทิ้ง — ถ้าขัดกับข้อความเก่า อันใหม่ชนะ
+              </Text>
+              <Text dimColor>
+                PM เป็นคนตัดสินใจเองว่าจะปล่อยให้ agent ที่รันอยู่ทำจนจบ ทิ้งงานแล้วสั่งใหม่ หรือหยุดมาถามคุณ — pmctl
+                ไม่ไปหยุดอะไรให้เอง
               </Text>
               <Text dimColor>Enter ขึ้นบรรทัดใหม่ · Esc ส่ง · Ctrl+C ยกเลิก</Text>
             </>
