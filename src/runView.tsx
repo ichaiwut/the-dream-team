@@ -6,7 +6,7 @@ import fs from "node:fs";
 import { Meta } from "./worktree.js";
 import { readLog, readLogSafe, LogEntry } from "./log.js";
 import { featureFile, FILES } from "./paths.js";
-import { buildPmSessionPlan, spawnClaudeProcess, PmPhase } from "./agents.js";
+import { buildPmSessionPlan, spawnClaudeProcess, PmPhase, type PmSessionPlan } from "./agents.js";
 // PIPELINE/checklist logic lives in pipeline.ts so plan.html's flow chart
 // (planHtml.ts) computes the exact same checklist the TUI shows here,
 // instead of drifting out of sync with a second copy of this logic.
@@ -710,7 +710,35 @@ function App({
     gateWatermarkRef.current = readLog(repoRoot, meta.feature).length;
     setActiveGate(null);
     setRunningPhase({ phase, startedAt: Date.now() });
-    const plan = buildPmSessionPlan(repoRoot, meta, permissionMode, clickupRef, phase);
+
+    // Building the plan reads role templates and config off disk, so it
+    // can fail for reasons that have nothing to do with the run: a role
+    // file referencing a variable this build doesn't define (a pull
+    // without a rebuild does exactly that), an unreadable file, a bad
+    // setting. This used to throw straight out of a keypress handler and
+    // kill the whole TUI — the same way one malformed log line used to —
+    // taking the session down over something the PO could have fixed in
+    // ten seconds. Show it and stay alive instead; the gate state is
+    // untouched, so a re-run picks up exactly where this left off.
+    let plan: PmSessionPlan;
+    try {
+      plan = buildPmSessionPlan(repoRoot, meta, permissionMode, clickupRef, phase);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setRunningPhase(null);
+      setLines((prev) =>
+        prev.concat(
+          "",
+          `⚠ เริ่มขั้นตอน "${PHASE_LABEL[phase]}" ไม่สำเร็จ:`,
+          ...splitLines(message),
+          "",
+          "งานที่ทำไปแล้วยังอยู่ครบ — แก้ตามข้อความข้างบนแล้วรัน pmctl run ใหม่ จะกลับมาที่ gate เดิม",
+          "กด q หรือ Enter เพื่อออก"
+        )
+      );
+      setDone({ code: 1 });
+      return;
+    }
     setPmPromptTokens(plan.promptTokens);
     plan.logFile.write(plan.notice);
 

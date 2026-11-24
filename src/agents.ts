@@ -35,9 +35,17 @@ function fillTemplate(template: string, vars: Record<string, string>): string {
   }
   const leftover = [...new Set(out.match(/\{\{[A-Z_][A-Z0-9_]*\}\}/g) ?? [])];
   if (leftover.length > 0) {
+    // By far the most common cause isn't a typo, it's a stale build: the
+    // role files under roles/ are read from the source tree at runtime
+    // while this code runs from dist/, so `git pull` updates the templates
+    // the moment it lands and leaves the compiled variables behind. Say
+    // that first — it's one command to fix, and the alternative reading
+    // ("someone broke the template") sends you looking in the wrong place.
     throw new Error(
-      `fillTemplate: เหลือ placeholder ที่ไม่มีใครแทนค่า: ${leftover.join(", ")} — ` +
-        `เพิ่มตัวแปรนี้ใน buildVars() หรือแก้ชื่อใน template ให้ตรง`
+      `fillTemplate: เหลือ placeholder ที่ไม่มีใครแทนค่า: ${leftover.join(", ")}\n` +
+        `สาเหตุที่พบบ่อยที่สุด: dist/ เก่ากว่า roles/ (ไฟล์ใน roles/ ถูกอ่านสดจาก source แต่โค้ดรันจาก dist/) — ` +
+        `ถ้าเพิ่ง git pull มา ให้รัน "npm run build" แล้วลองใหม่\n` +
+        `ถ้า build ใหม่แล้วยังขึ้นอยู่ แปลว่าตัวแปรนี้ไม่มีจริง — เพิ่มใน buildVars() หรือแก้ชื่อใน template ให้ตรง`
     );
   }
   return out;
