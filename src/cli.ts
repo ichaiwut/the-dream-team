@@ -52,6 +52,11 @@ program
       "พิมพ์เองตอนเริ่มรัน ใช้ flag นี้เมื่อต้องการสั่งมาจาก command line เลย (ยังแก้ได้ก่อนกด Esc เริ่มงาน)",
   )
   .option(
+    "--no-commit",
+    "ไม่ต้อง commit ให้ตอน PO อนุมัติปิดงาน (ปกติ pmctl จะ commit การเปลี่ยนแปลงใน working tree ให้ ไม่รวม .pmctl/ " +
+      "และไม่ push ไม่ยุ่งกับ branch)",
+  )
+  .option(
     "--no-ask-brief",
     "ข้ามช่องพิมพ์ข้อสั่งการตอนเริ่มรัน ให้ PM วางแผนจาก ClickUp ticket อย่างเดียว",
   )
@@ -65,6 +70,7 @@ program
         permissionMode: string;
         brief?: string;
         askBrief?: boolean;
+        commit?: boolean;
       },
     ) => {
       let meta;

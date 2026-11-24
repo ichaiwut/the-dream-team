@@ -52,6 +52,7 @@ function buildVars(repoRoot: string, meta: Meta): Record<string, string> {
     DEV_SUMMARY_PATH: path.join(dir, FILES.devSummary),
     PO_BRIEF_PATH: path.join(dir, FILES.poBrief),
     PO_MESSAGES_PATH: path.join(dir, FILES.poMessages),
+    COMMIT_MESSAGE_PATH: path.join(dir, FILES.commitMessage),
     // Concrete, runnable command for appending a log line — see the
     // log-append subcommand in src/cli.ts for why PM must not hand-encode
     // the JSON itself.
@@ -196,8 +197,9 @@ const PHASE_INSTRUCTION: Record<Exclude<PmPhase, "fullRunNoGate">, string> = {
     `แล้ว append log "step":"tester_done" (ถ้าผ่าน) หรือ "step":"iteration" (ถ้า fail) แล้ว**หยุดทันที** ` +
     `**ห้ามสั่ง Dev แก้ต่อในรอบนี้เด็ดขาด** — PO ต้องอ่านผลเทสต์แล้วกดอนุมัติก่อนเสมอ`,
   final:
-    `ทำเฉพาะขั้นตอน 6 (จบงาน) เท่านั้น — เขียน section "## สถานะสุดท้าย" ต่อท้าย plan.md ` +
-    `แล้ว append log "step":"final_done" แล้วหยุด ไม่ต้องสั่ง agent ตัวไหนอีก`,
+    `ทำเฉพาะขั้นตอน 6 (จบงาน) เท่านั้น — เขียน section "## สถานะสุดท้าย" ต่อท้าย plan.md, ` +
+    `เขียนข้อความ commit ลงไฟล์ตามที่ role ของคุณระบุ (COMMIT_MESSAGE_PATH) เพราะ pmctl จะเอาไปใช้ commit จริง, ` +
+    `แล้ว append log "step":"final_done" แล้วหยุด ไม่ต้องสั่ง agent ตัวไหนอีก และ**ห้ามรัน git commit เอง**`,
 };
 
 /** Wire name for a phase, as it appears on the `PHASE:` line PM reads. */
@@ -265,6 +267,9 @@ export function buildPmSessionPlan(
   phase: PmPhase = "fullRunNoGate"
 ): PmSessionPlan {
   const vars = buildVars(repoRoot, meta);
+  // Known per invocation rather than per feature, so it's added here
+  // instead of in buildVars.
+  vars.CLICKUP_REF = clickupRef;
   // Dev/Reviewer/Tester are spawned by PM's own Bash tool as nested, fully
   // headless `claude -p` calls with no human attached. Any Bash command one
   // of them runs that isn't already covered by an allow rule in
@@ -362,6 +367,7 @@ export function spawnPmSession(
  */
 export function spawnRefreshSpec(repoRoot: string, meta: Meta, clickupRef: string): Promise<number> {
   const vars = buildVars(repoRoot, meta);
+  vars.CLICKUP_REF = clickupRef;
 
   const prompt =
     `ใช้ ClickUp tool ของคุณ (เช่น clickup_get_task — ถ้า ref เป็น custom id พร้อม URL ที่มี team id ` +

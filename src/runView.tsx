@@ -29,6 +29,13 @@ import {
 } from "./planHtml.js";
 import { notify } from "./notify.js";
 import {
+  listPendingChanges,
+  commitWork,
+  readCommitMessage,
+  recordGitBaseline,
+  type CommitResult,
+} from "./gitCommit.js";
+import {
   readSessionStats,
   formatSessionStats,
   estimateTokens,
@@ -296,6 +303,17 @@ function readOptionalFile(repoRoot: string, feature: string, key: "poBrief" | "p
   }
 }
 
+/** What happened at commit time, for the final report. */
+function describeCommitMarkdown(commit: CommitResult | null, enabled: boolean): string {
+  if (!enabled) return "ปิดการ commit อัตโนมัติไว้ (`--no-commit`) — งานยังอยู่ใน working tree ยังไม่ได้ commit";
+  if (!commit) return "";
+  if (commit.ok) {
+    const files = commit.files.map((f) => `- \`${f}\``).join("\n");
+    return `commit สำเร็จ: \`${commit.hash}\`\n\nไฟล์ที่ commit:\n\n${files}\n\nหมายเหตุ: pmctl ไม่ push ให้ และไม่ยุ่งกับ branch — push เองเมื่อพร้อม`;
+  }
+  return `**commit ไม่สำเร็จ** — งานยังอยู่ใน working tree ครบ ไม่ได้หายไปไหน\n\n\`\`\`\n${commit.error ?? ""}\n\`\`\``;
+}
+
 /** Messages already in the thread, counted by their timestamp headings. */
 function countPoMessages(repoRoot: string, feature: string): number {
   try {
@@ -429,6 +447,7 @@ function App({
   permissionMode,
   clickupRef,
   briefMode,
+  commitOnFinish,
   onDone,
 }: {
   repoRoot: string;
@@ -441,6 +460,8 @@ function App({
    * line, pre-filled so it can still be edited before it's used.
    */
   briefMode: string;
+  /** Whether approving the last gate also commits the work. */
+  commitOnFinish: boolean;
   onDone: (code: number) => void;
 }) {
   const { exit } = useApp();
@@ -457,6 +478,8 @@ function App({
   const [planScroll, setPlanScroll] = useState(0);
   const [planHtmlPath, setPlanHtmlPath] = useState("");
   const [finalHtmlPath, setFinalHtmlPath] = useState("");
+  // Result of the commit pmctl makes once the PO approves the last gate.
+  const [commitResult, setCommitResult] = useState<CommitResult | null>(null);
   // Which hand-off the run is parked at, null while it's moving. Drives
   // what the approval screen says and which phase approving it starts.
   const [activeGate, setActiveGate] = useState<Gate | null>(null);
@@ -739,6 +762,19 @@ function App({
    */
   function finishRun(freshLog: LogEntry[], exitCode: number) {
     setRunningPhase(null);
+
+    // The PO approved the last gate, which is what authorises this. pmctl
+    // commits rather than PM, so the commit is a mechanical step at a
+    // known moment instead of an LLM composing git commands mid-run —
+    // and so the PO gets to see what it would contain before approving.
+    // Branches stay the PO's own business and nothing is pushed.
+    let commit: CommitResult | null = null;
+    if (commitOnFinish && exitCode === 0) {
+      const message = readCommitMessage(repoRoot, meta.feature, clickupRef);
+      commit = commitWork(meta.worktreePath, repoRoot, meta.feature, message);
+      setCommitResult(commit);
+    }
+
     const htmlPath = featureFile(repoRoot, meta.feature, "finalHtml");
     let built = false;
     try {
@@ -754,6 +790,7 @@ function App({
           { heading: "ข้อสั่งการจาก PO ก่อนเริ่มงาน", markdown: readOptionalFile(repoRoot, meta.feature, "poBrief") },
           { heading: "ข้อความจาก PO ระหว่างทาง", markdown: readOptionalFile(repoRoot, meta.feature, "poMessages") },
           { heading: "ต้นทุนและ context ของแต่ละ session", markdown: buildStatsMarkdown(repoRoot, meta.feature) },
+          { heading: "Commit", markdown: describeCommitMarkdown(commit, commitOnFinish) },
         ],
         log: freshLog,
         generatedAt: new Date().toLocaleString("th-TH"),
@@ -773,6 +810,11 @@ function App({
   }
 
   useEffect(() => {
+    // Snapshot what was already dirty before this run touches anything,
+    // so the commit at the end can tell this run's work apart from the
+    // PO's own in-progress edits. No-ops on a resumed run.
+    if (commitOnFinish) recordGitBaseline(repoRoot, meta.feature, meta.worktreePath);
+
     const resume = determineResumePhase(repoRoot, meta.feature);
     const resumeLog = readLog(repoRoot, meta.feature);
     if (resume === "gateResume") {
@@ -1092,6 +1134,14 @@ function App({
     const atBottom = planScroll >= planMaxScroll;
     const hasQuestions = hasOpenQuestions(planPreview);
     const pmPassedThrough = hasUnresolvedAgentQuestions(planPreview);
+    // Read at render time rather than cached: the PO may have edited files
+    // themselves while reading the gate, and what gets committed should be
+    // what's actually there when they approve.
+    const pending =
+      activeGate?.nextPhase === "final"
+        ? listPendingChanges(meta.worktreePath, repoRoot, meta.feature)
+        : { files: [], preExisting: [] };
+    const pendingFiles = pending.files;
     return (
       <Box flexDirection="column" width={columns} height={rows}>
         <Box>
@@ -1119,6 +1169,31 @@ function App({
             <Text bold color="red">
               ⚠ มีคำถามถึง PO อยู่ในเอกสารนี้ — กด a เพื่อพิมพ์คำตอบก่อนอนุมัติ
             </Text>
+          )}
+          {activeGate?.nextPhase === "final" && commitOnFinish && (
+            // The last gate is the one that also authorises the commit, so
+            // it has to say so before the PO presses y — not afterwards.
+            <Box flexDirection="column">
+              <Text color="green">
+                เมื่ออนุมัติ: PM สรุปปิดงาน แล้ว pmctl จะ commit ให้ {pendingFiles.length} ไฟล์ (ไม่รวม .pmctl/ และไม่ push)
+              </Text>
+              {pendingFiles.slice(0, 5).map((f) => (
+                <Text key={f} dimColor>
+                  {"  "}
+                  {f}
+                </Text>
+              ))}
+              {pendingFiles.length > 5 && <Text dimColor>{"  "}… อีก {pendingFiles.length - 5} ไฟล์</Text>}
+              {pendingFiles.length === 0 && <Text dimColor>{"  "}(ไม่มีไฟล์ที่เปลี่ยนจากรอบนี้ — จะไม่ commit อะไร)</Text>}
+              {pending.preExisting.length > 0 && (
+                <Text color="yellow">
+                  ข้าม {pending.preExisting.length} ไฟล์ที่มีการแก้ค้างอยู่ก่อนเริ่มรัน — ไม่ commit ให้ ({
+                    pending.preExisting.slice(0, 3).join(", ")
+                  }
+                  {pending.preExisting.length > 3 ? ", …" : ""}) จัดการเองนะ
+                </Text>
+              )}
+            </Box>
           )}
           {pmPassedThrough && (
             <Text bold color="yellow">
@@ -1361,6 +1436,14 @@ function App({
           {done && !done.rejected && finalHtmlPath !== "" && (
             <Text color="green">รายงานสรุป: file://{finalHtmlPath}</Text>
           )}
+          {done && commitResult?.ok && (
+            <Text color="green">
+              commit แล้ว: {commitResult.hash} ({commitResult.files.length} ไฟล์) — ยังไม่ push ให้นะ push เองเมื่อพร้อม
+            </Text>
+          )}
+          {done && commitResult && !commitResult.ok && (
+            <Text color="red">commit ไม่สำเร็จ: {commitResult.error?.split("\n")[0]} — งานยังอยู่ครบใน working tree</Text>
+          )}
           {done && done.rejected && (
             <Text bold color="red">
               -- หยุดไว้ที่ขั้นตอนนี้ — แก้ไฟล์ของขั้นตอนนั้นเองแล้วรัน pmctl run ใหม่ จะกลับมาถามที่เดิม --
@@ -1434,7 +1517,8 @@ export function runPmSessionWithTui(
   meta: Meta,
   permissionMode: string,
   clickupRef: string,
-  briefMode: string = "ask"
+  briefMode: string = "ask",
+  commitOnFinish: boolean = true
 ): Promise<number> {
   return new Promise((resolve) => {
     render(
@@ -1444,6 +1528,7 @@ export function runPmSessionWithTui(
         permissionMode={permissionMode}
         clickupRef={clickupRef}
         briefMode={briefMode}
+        commitOnFinish={commitOnFinish}
         onDone={resolve}
       />
     );

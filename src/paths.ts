@@ -45,6 +45,13 @@ export const FILES = {
   // a headless `claude -p` with no stdin to interrupt — so the file is how
   // "I want to say something now" becomes "PM acts on it next stage".
   poMessages: "po-messages.md",
+  // Commit message PM writes at the final stage. PM has the context for a
+  // useful subject line; pmctl, which runs the commit, has none beyond the
+  // feature name — so it asks rather than inventing one.
+  commitMessage: "commit-message.txt",
+  // Paths already dirty when the run started, so the final commit can tell
+  // this run's work apart from whatever the PO had lying around.
+  gitBaseline: "git-baseline.json",
   pmSession: "pm-session.log",
   devSession: "dev-session.log",
   reviewerSession: "reviewer-session.log",
