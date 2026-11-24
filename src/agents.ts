@@ -414,8 +414,18 @@ export function spawnPmSession(
   repoRoot: string,
   meta: Meta,
   permissionMode: string,
-  clickupRef: string
+  clickupRef: string,
+  /** --brief text. There's no TTY here to type one into, but one given on
+   *  the command line still applies. */
+  brief?: string
 ): Promise<number> {
+  if (brief && brief.trim()) {
+    try {
+      fs.writeFileSync(featureFile(repoRoot, meta.feature, "poBrief"), brief.trim() + "\n", "utf8");
+    } catch {
+      // Best-effort, same as the TUI path.
+    }
+  }
   const plan = buildPmSessionPlan(repoRoot, meta, permissionMode, clickupRef);
   console.log(plan.notice);
   return runClaude({ args: plan.args, cwd: plan.cwd, logFile: plan.logFile });

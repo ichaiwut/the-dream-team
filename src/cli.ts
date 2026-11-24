@@ -3,6 +3,7 @@ import { Command } from "commander";
 import fs from "node:fs";
 import { createIsolatedWorktree, loadMeta, removeWorktree, useCurrentCheckout } from "./worktree.js";
 import { appendLog, formatLog, readLog, readLogSafe, type LogActor } from "./log.js";
+import { openGate, phaseAfterLog } from "./pipeline.js";
 import { featureFile, stateRoot } from "./paths.js";
 import { spawnPmSession, spawnRefreshSpec } from "./agents.js";
 import { watchFeatures } from "./watch.js";
@@ -27,7 +28,11 @@ program
   .description(
     "เริ่ม PM session สำหรับ feature นี้ (ค่าเริ่มต้นทำงานตรงใน branch ปัจจุบันของคุณ ไม่สร้าง branch/worktree ใหม่)",
   )
-  .requiredOption("--clickup <ref>", "ClickUp task id หรือวาง URL เต็มก็ได้ (เช่น https://app.clickup.com/t/9018044177/DSAG-218)")
+  .option(
+    "--clickup <ref>",
+    "ClickUp task id หรือวาง URL เต็มก็ได้ (เช่น https://app.clickup.com/t/9018044177/DSAG-218) — " +
+      "จำเป็นเฉพาะตอนเริ่ม feature ใหม่ ถ้า feature นี้เคยรันแล้ว ไม่ต้องใส่ pmctl อ่านจากที่บันทึกไว้เอง",
+  )
   .option(
     "--isolate",
     "สร้าง git worktree แยกต่างหากแทนการทำงานในที่เดิม (ต้องมี branch ที่ตั้งใจใช้อยู่แล้ว pmctl จะไม่สร้างให้)",
@@ -64,7 +69,7 @@ program
     async (
       feature: string,
       opts: {
-        clickup: string;
+        clickup?: string;
         isolate?: boolean;
         branch?: string;
         permissionMode: string;
@@ -73,19 +78,49 @@ program
         commit?: boolean;
       },
     ) => {
+      // Resuming is the common case after a stop, an interrupt, or simply
+      // closing the terminal — so it shouldn't demand the ClickUp ref
+      // again. It's already in this feature's meta.json; asking the PO to
+      // dig it out to continue work they've already started is friction
+      // for nothing.
+      const existing = (() => {
+        try {
+          return loadMeta(repoRoot, feature);
+        } catch {
+          return null;
+        }
+      })();
+      const clickupRef = opts.clickup ?? existing?.clickupTaskId;
+      if (!clickupRef) {
+        console.error(
+          `[pmctl] feature "${feature}" ยังไม่เคยรัน จึงต้องระบุ --clickup <ref> ด้วย\n` +
+            `         (ถ้าตั้งใจรันต่อของเดิม เช็คชื่อ feature ด้วย "pmctl status" อีกที)`,
+        );
+        process.exitCode = 2;
+        return;
+      }
+
       let meta;
       if (opts.isolate) {
         console.log(`[pmctl] สร้าง worktree แยกสำหรับ feature "${feature}"...`);
-        meta = createIsolatedWorktree(repoRoot, feature, opts.clickup, opts.branch);
+        meta = createIsolatedWorktree(repoRoot, feature, clickupRef, opts.branch);
       } else {
-        console.log(`[pmctl] เริ่ม feature "${feature}" ใน branch ปัจจุบัน (ไม่สร้าง worktree ใหม่)...`);
-        meta = useCurrentCheckout(repoRoot, feature, opts.clickup);
+        console.log(
+          existing
+            ? `[pmctl] ทำงานต่อ feature "${feature}" (ClickUp ${clickupRef}) — จะกลับไปที่ขั้นตอนที่ค้างไว้`
+            : `[pmctl] เริ่ม feature "${feature}" ใน branch ปัจจุบัน (ไม่สร้าง worktree ใหม่)...`,
+        );
+        meta = useCurrentCheckout(repoRoot, feature, clickupRef);
       }
 
       appendLog(repoRoot, feature, {
         actor: "system",
-        step: "feature_created",
-        reason: `pmctl run เริ่มงานใหม่จาก ClickUp task ${opts.clickup}`,
+        // A resume used to log "เริ่มงานใหม่" too, which made the timeline
+        // read as if the work had restarted from scratch each time.
+        step: existing ? "run_resumed" : "feature_created",
+        reason: existing
+          ? `pmctl run ทำงานต่อจากที่ค้างไว้ (ClickUp ${clickupRef})`
+          : `pmctl run เริ่มงานใหม่จาก ClickUp task ${clickupRef}`,
         result: `worktree=${meta.worktreePath} port=${meta.port}`,
       });
 
@@ -95,8 +130,18 @@ program
       // stdout streaming when there's no real TTY (piped output, CI, etc.),
       // same reasoning as the `watch` command's own fallback.
       const exitCode = isRealTty()
-        ? await runPmSessionWithTui(repoRoot, meta, opts.permissionMode, opts.clickup)
-        : await spawnPmSession(repoRoot, meta, opts.permissionMode, opts.clickup);
+        ? await runPmSessionWithTui(
+            repoRoot,
+            meta,
+            opts.permissionMode,
+            clickupRef,
+            opts.brief ?? (opts.askBrief === false ? "skip" : "ask"),
+            opts.commit !== false,
+          )
+        // No TTY, so there is nobody to show a brief box to and nobody to
+        // approve a gate; --brief still applies, since it came from the
+        // command line rather than from a prompt.
+        : await spawnPmSession(repoRoot, meta, opts.permissionMode, clickupRef, opts.brief);
 
       if (exitCode !== 0) process.exitCode = exitCode;
     },
@@ -131,9 +176,23 @@ program
         const meta = loadMeta(repoRoot, feature);
         const log = readLog(repoRoot, feature);
         const last = log[log.length - 1];
+        const gate = openGate(log);
+        const next = phaseAfterLog(log);
+        // The whole point of looking at status is usually "where was I, and
+        // how do I pick it up" — so it answers both, including the exact
+        // command, rather than leaving the PO to reconstruct it.
+        const where = gate
+          ? `ค้างอยู่ที่ gate: ${gate.gate.title}`
+          : next === "done"
+            ? "จบงานแล้ว"
+            : last
+              ? `ค้างกลางขั้นตอน (ล่าสุด: ${last.step}) — รันต่อจะทำขั้นตอน "${next}" ใหม่`
+              : "ยังไม่ได้เริ่ม";
         console.log(
-          `- ${feature} (branch ${meta.branch}, port ${meta.port})` +
-            (last ? `\n    ล่าสุด: [${last.actor}] ${last.step}` : "")
+          `- ${feature} (branch ${meta.branch}, port ${meta.port}` +
+            (meta.clickupTaskId ? `, ClickUp ${meta.clickupTaskId}` : "") +
+            `)\n    ${where}` +
+            (next === "done" ? "" : `\n    ทำต่อ: pmctl run ${feature}`)
         );
       } catch {
         /* skip malformed feature dirs */
