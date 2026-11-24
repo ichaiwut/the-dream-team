@@ -4,7 +4,7 @@ import { ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 import fs from "node:fs";
 import { Meta } from "./worktree.js";
-import { readLog, readLogSafe, LogEntry } from "./log.js";
+import { appendLog, readLog, readLogSafe, LogEntry } from "./log.js";
 import { featureFile, FILES } from "./paths.js";
 import { buildPmSessionPlan, spawnClaudeProcess, PmPhase, type PmSessionPlan } from "./agents.js";
 // PIPELINE/checklist logic lives in pipeline.ts so plan.html's flow chart
@@ -30,6 +30,7 @@ import {
 } from "./planHtml.js";
 import { notify } from "./notify.js";
 import { collectRunDiff } from "./gitDiff.js";
+import { killTree } from "./killTree.js";
 import {
   listPendingChanges,
   commitWork,
@@ -362,6 +363,32 @@ function buildExchangeMarkdown(repoRoot: string, feature: string, agent: SubAgen
   return `${promptPart}\n${replyPart}`;
 }
 
+/**
+ * An emergency stop typed into the message box.
+ *
+ * Ordinary messages wait for PM to regain control, which can be minutes
+ * while a sub-agent grinds — fine for "also update the tooltip", useless
+ * for "stop". So this one case is handled by pmctl directly rather than by
+ * PM: pmctl owns the processes and can end them now.
+ *
+ * Matching is deliberately narrow. The interrupt words carry no other
+ * meaning in a message to PM, so they can match anywhere, misspellings
+ * included — the PO typing this is in a hurry. The Thai phrases only count
+ * at the start of the message, because "ถ้าเทสต์ไม่ผ่านให้หยุด" is an
+ * instruction about the work, not a request to halt it, and killing a run
+ * over that would be far worse than missing a stop the PO can repeat.
+ */
+const INTERRUPT_PATTERNS = [
+  /int[e3]rr?u[pb]+t?/i,
+  /\/stop\b/i,
+  /^\s*(หยุดทุกอย่าง|หยุดทันที|หยุดเดี๋ยวนี้|หยุดก่อน|หยุด!)/,
+  /^\s*stop\b/i,
+];
+
+export function isInterruptMessage(text: string): boolean {
+  return INTERRUPT_PATTERNS.some((re) => re.test(text.trim()));
+}
+
 /** Messages already in the thread, counted by their timestamp headings. */
 function countPoMessages(repoRoot: string, feature: string): number {
   try {
@@ -612,6 +639,14 @@ function App({
   const gateWatermarkRef = useRef(0);
   /** Whether this invocation's output has mentioned permissions at all. */
   const permissionSmellRef = useRef(false);
+  /**
+   * Set once the PO has stopped the run. The killed process still emits
+   * "close", and that handler would otherwise carry on with normal
+   * end-of-phase logic — reporting its own exit code over the stop's,
+   * opening a gate, or starting the next stage. After a stop there is no
+   * next anything.
+   */
+  const stoppedRef = useRef(false);
   // One notification per state change, not one per poll tick — the log line
   // that triggered it stays in the log forever, so without this the PO would
   // get a bell every second for the rest of the run.
@@ -718,6 +753,53 @@ function App({
     return true;
   }
 
+  /**
+   * Everything stops, now. The one thing in the message channel pmctl
+   * acts on itself instead of leaving to PM — PM might not regain control
+   * for minutes, and by then "stop" has lost its meaning.
+   *
+   * Kills PM and every sub-agent it spawned (killTree, since the
+   * sub-agents are PM's children and outlive it otherwise), records the
+   * stop in the log so the history shows why the run ends here, and
+   * leaves every file untouched: the message is already saved, so the
+   * next run's PM reads it, and the gate state is intact so a re-run
+   * resumes where this stopped.
+   */
+  function emergencyStop(reason: string) {
+    stoppedRef.current = true;
+    // Close the box first: this is called from inside the Esc handler,
+    // which returns early and so never reaches the usual cleanup. Leaving
+    // it open meant the PO saw their own half-typed message instead of the
+    // confirmation, and every key after it went into a dead text field.
+    setTextEntry(null);
+    setEntryText("");
+    clearPendingRetry();
+    const child = childRef.current;
+    if (child?.pid) killTree(child.pid);
+    childRef.current = null;
+    try {
+      appendLog(repoRoot, meta.feature, {
+        actor: "pm",
+        step: "po_interrupt",
+        reason: `PO สั่งหยุดทุกอย่างกลางคัน: ${reason}`,
+      });
+    } catch {
+      // The stop matters more than the record of it.
+    }
+    setRunningPhase(null);
+    setAwaitingApproval(false);
+    setLines((prev) =>
+      prev.concat(
+        "",
+        "■ หยุดทุกอย่างแล้วตามที่สั่ง — PM และ agent ลูกทั้งหมดถูกปิดแล้ว",
+        "ไฟล์ทั้งหมดยังอยู่ครบ ไม่มีอะไรถูกย้อน และข้อความของคุณถูกบันทึกไว้แล้ว",
+        "รัน pmctl run ใหม่เมื่อพร้อม — จะกลับมาที่ขั้นตอนเดิม และ PM จะอ่านข้อความนี้ก่อนทำอะไรต่อ",
+        "กด q หรือ Enter เพื่อออก"
+      )
+    );
+    setDone({ code: 130 });
+  }
+
   function approveGate() {
     const next = activeGate?.nextPhase ?? "dev";
     if (activeGate && planHtmlPath !== "") {
@@ -729,6 +811,7 @@ function App({
   }
 
   function startPhase(phase: PmPhase, attempt: number = 1) {
+    if (stoppedRef.current) return;
     currentPhaseRef.current = phase;
     // A fresh invocation is past whichever gate opened it, so the gate
     // machinery starts listening again — but only for log entries written
@@ -801,6 +884,7 @@ function App({
         setLines((prev) => prev.concat(tailRef.current));
         tailRef.current = "";
       }
+      if (stoppedRef.current) return; // the PO stopped this run; nothing follows
       if (gateShownRef.current) {
         // The log poll below already saw this stage's gate step land and
         // killed this process on purpose — this "close" is that kill
@@ -1008,7 +1092,7 @@ function App({
       // still-running invocation — it has nothing left it should be doing —
       // and open the gate now. This is also what stops a disobedient PM
       // from running the whole chain in one go.
-      if (!gateShownRef.current && currentPhaseRef.current !== "fullRunNoGate") {
+      if (!stoppedRef.current && !gateShownRef.current && currentPhaseRef.current !== "fullRunNoGate") {
         const parked = openGate(freshLog);
         const finalAt = finalDoneIndex(freshLog);
         const stopHere = () => {
@@ -1076,6 +1160,10 @@ function App({
                 "utf8"
               );
               setMessageCount((n) => n + 1);
+              if (isInterruptMessage(trimmed)) {
+                emergencyStop(trimmed);
+                return;
+              }
             } else {
               fs.writeFileSync(
                 featureFile(repoRoot, meta.feature, kind === "brief" ? "poBrief" : "answers"),
@@ -1114,7 +1202,10 @@ function App({
     }
     if (key.ctrl && input === "c") {
       clearPendingRetry();
-      childRef.current?.kill();
+      // The tree, not just PM: its sub-agents are separate processes and
+      // would otherwise keep editing files with nothing watching them.
+      const child = childRef.current;
+      if (child?.pid) killTree(child.pid);
       onDone(130);
       exit();
       return;
