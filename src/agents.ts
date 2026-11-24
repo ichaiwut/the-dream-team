@@ -19,6 +19,55 @@ const ROLES_DIR = path.join(__dirname, "..", "roles");
  */
 const CLI_ENTRY = path.join(__dirname, "cli.js");
 
+/**
+ * Trims a role template down to the sections the current phase actually
+ * needs.
+ *
+ * Every phase is a separate `claude -p` process, so each one pays for the
+ * whole system prompt again — pm.md at ~9.7k tokens across five phases is
+ * ~49k tokens of instructions before PM reads a single file, most of it
+ * about stages that phase is forbidden from doing. The `dev` phase has no
+ * use for how to fetch a ClickUp spec, and the `final` phase none for how
+ * to dispatch a sub-agent.
+ *
+ * A section is marked with `<!-- phases: dev,reviewer -->` on the line
+ * before its heading. Unmarked sections are kept for every phase, so the
+ * default is "include" and a forgotten marker costs tokens rather than
+ * correctness. fullRunNoGate keeps everything, since it does run the lot.
+ *
+ * Headings inside fenced code blocks are not headings — pm.md contains a
+ * markdown template with `##` lines in it, and splitting there would cut a
+ * section in half.
+ */
+export function selectPhaseSections(template: string, phase: PmPhase): string {
+  if (phase === "fullRunNoGate") return template.replace(/^<!--\s*phases:[^>]*-->\n/gm, "");
+
+  const lines = template.split("\n");
+  const out: string[] = [];
+  let inFence = false;
+  let skipping = false;
+  let pendingPhases: string[] | null = null;
+
+  for (const line of lines) {
+    if (/^\s*```/.test(line)) inFence = !inFence;
+
+    if (!inFence) {
+      const marker = /^<!--\s*phases:\s*([a-zA-Z,\s]+)-->\s*$/.exec(line);
+      if (marker) {
+        pendingPhases = marker[1].split(",").map((p) => p.trim()).filter(Boolean);
+        continue; // the marker itself never reaches the agent
+      }
+      if (/^#{2,3} /.test(line)) {
+        // A heading ends whatever the previous marker covered.
+        skipping = pendingPhases !== null && !pendingPhases.includes(phase);
+        pendingPhases = null;
+      }
+    }
+    if (!skipping) out.push(line);
+  }
+  return out.join("\n");
+}
+
 function fillTemplate(template: string, vars: Record<string, string>): string {
   let out = template;
   for (const [key, value] of Object.entries(vars)) {
@@ -294,7 +343,10 @@ export function buildPmSessionPlan(
   // default) governs the sub-agents too, rather than silently overriding it.
   vars.SUB_AGENT_PERMISSION_MODE = permissionMode;
   renderSubAgentRoles(featureDir(repoRoot, meta.feature), vars);
-  const pmRoleTemplate = fs.readFileSync(path.join(ROLES_DIR, "pm.md"), "utf8");
+  const pmRoleTemplate = selectPhaseSections(
+    fs.readFileSync(path.join(ROLES_DIR, "pm.md"), "utf8"),
+    phase
+  );
   const pmSystemPrompt = fillTemplate(pmRoleTemplate, vars);
 
   // Best-effort: without this, PM's nested `claude -p ...` calls to spawn
